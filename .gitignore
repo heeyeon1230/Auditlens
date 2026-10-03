@@ -1,0 +1,8 @@
+__pycache__/
+*.pyc
+.venv/
+venv/
+.pytest_cache/
+.streamlit/secrets.toml
+# 실제 회사 자료가 실수로 올라가지 않도록 데이터 폴더의 업로드 파일은 제외
+data/private/
