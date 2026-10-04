@@ -132,18 +132,19 @@ def key_account_group(code, name):
 
 
 def _account_names(df):
-    """계정코드별 대표 계정과목명. 이름이 여러 개면 가장 많이 쓰인 이름 뒤에 '외 n개'를 붙입니다."""
-    names = {}
-    for code, series in df.groupby("account_code")["account_name"]:
-        counts = series.dropna().astype(str).str.strip()
-        counts = counts[counts != ""].value_counts()
-        if len(counts) == 0:
-            names[code] = ""
-        elif len(counts) == 1:
-            names[code] = counts.index[0]
-        else:
-            names[code] = f"{counts.index[0]} 외 {len(counts) - 1}개"
-    return pd.Series(names, dtype=str)
+    """계정코드별 계정과목명.
+
+    반환값: (표시용 이름, 대표 이름) 두 Series.
+    대표 이름은 가장 많이 쓰인 이름이고, 횟수가 같으면 파일에서 먼저 나온 이름입니다.
+    이름이 여러 개면 표시용 이름에만 '외 n개'를 붙이고, 주요 계정 구분은 대표 이름으로 판단합니다.
+    """
+    display, primary = {}, {}
+    for code, series in df.groupby("account_code", sort=False)["account_name"]:
+        names = series.dropna().astype(str).str.strip()
+        counts = names[names != ""].value_counts(sort=False).sort_values(ascending=False, kind="stable")
+        primary[code] = counts.index[0] if len(counts) else ""
+        display[code] = primary[code] + (f" 외 {len(counts) - 1}개" if len(counts) > 1 else "")
+    return pd.Series(display, dtype=str), pd.Series(primary, dtype=str)
 
 
 def account_summary(df: pd.DataFrame):
@@ -164,9 +165,10 @@ def account_summary(df: pd.DataFrame):
         "라인 금액 최대": g["line_amount"].max(),
     })
     table["순액(차변-대변)"] = table["차변 합계"] - table["대변 합계"]
-    table["계정과목명"] = _account_names(df)
+    display, primary = _account_names(df)
+    table["계정과목명"] = display
+    table["주요 계정 구분"] = [key_account_group(c, primary[c]) or "" for c in table.index]
     table = table.reset_index().rename(columns={"account_code": "계정코드"})
-    table["주요 계정 구분"] = [key_account_group(c, n) or "" for c, n in zip(table["계정코드"], table["계정과목명"])]
     return table[columns].sort_values("계정코드", key=_code_sort_key).reset_index(drop=True)
 
 

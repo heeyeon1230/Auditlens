@@ -276,3 +276,50 @@ def test_검증에서_제외된_행은_분석에_들어가지_않음():
     ov = A.overview(df)
     assert ov["라인 수"] == 2 and ov["총 차변"] == 1000 and ov["총 대변"] == 1000
     assert len(result.excluded_rows) == 2
+
+
+# ---------------------------------------------------------------- 계정코드·계정과목명 불일치 (PR 2 추가 확인)
+def test_계정코드가_빈_행은_검증에서_제외되어_분류되지_않음():
+    raw = pd.DataFrame({
+        "je_id": ["J1", "J1"], "posting_date": ["2025-01-05", "2025-01-05"],
+        "account_code": ["", "251"], "account_name": ["원재료", "외상매입금"],
+        "debit": ["100", ""], "credit": ["", "100"],
+    })
+    result = validate_journal(raw, MAPPING)
+    assert any(i["코드"] == "V5" and "계정코드" in i["문제"] for i in result.issues)
+    df, _ = A.prepare(result.clean)
+    assert list(A.account_summary(df)["계정코드"]) == ["251"]
+    assert A.key_account_summary(df).set_index("구분").loc["원재료", "라인 수"] == 0
+
+
+def test_계정과목명이_계정코드보다_먼저_적용됨():
+    rows = [
+        ("J1", "2025-01-01", "501", "원재료", 100, 0),  # 제조원가 범위 코드지만 이름이 '원재료'
+        ("J2", "2025-01-02", "131", "원재료비", 100, 0),  # 원재료 코드지만 이름이 '원재료비'
+        ("J3", "2025-01-03", "533", "", 100, 0),  # 이름이 비어 있으면 코드로만 판단
+        ("J4", "2025-01-04", "5100", "원재료비", 100, 0),  # 4자리 코드는 500~599가 아님
+    ]
+    df, _ = A.prepare(make_clean(rows))
+    groups = dict(zip(A.account_summary(df)["계정코드"], A.account_summary(df)["주요 계정 구분"]))
+    assert groups == {"131": "", "501": "원재료", "533": "제조원가", "5100": ""}
+
+
+def test_계정과목명이_여러_개면_대표_이름으로_분류():
+    # 같은 횟수면 파일에서 먼저 나온 이름이 대표 이름입니다.
+    rows = [("J1", "2025-01-01", "135", "제품", 100, 0), ("J1", "2025-01-01", "135", "완제품", 0, 100)]
+    df, _ = A.prepare(make_clean(rows))
+    row = A.account_summary(df).iloc[0]
+    assert row["계정과목명"] == "제품 외 1개" and row["주요 계정 구분"] == "제품"
+    rows = [("J1", "2025-01-01", "135", "완제품", 100, 0), ("J1", "2025-01-01", "135", "제품", 0, 100)]
+    df, _ = A.prepare(make_clean(rows))
+    row = A.account_summary(df).iloc[0]
+    assert row["계정과목명"] == "완제품 외 1개" and row["주요 계정 구분"] == ""
+
+
+def test_전기_자료가_전혀_없는_연도와_비교():
+    df, _ = A.prepare(make_clean(BASIC[4:]))  # 2025년 자료만
+    table = A.compare_years(df, 2024, 2025, "차변 합계").set_index("월")
+    assert table.loc["1월", "전기"] == 0 and table.loc["1월", "당기"] == 1500
+    assert pd.isna(table.loc["1월", "증감률(%)"])
+    assert table.loc["1월", "비고"] == "전기 자료 없음"
+    assert table.loc["합계", "비고"] == ""
