@@ -459,3 +459,54 @@ def test_한_행에_사유가_여러_개면_모두_표시():
     result, df = _run(rows)
     assert result.excluded_detail.loc[0, "사유"] == "회계처리일 형식 오류('2025-13-01'), 차변금액 형식 오류('abc')"
     assert A.voucher_status(df, result.excluded_detail).loc[0, "상태"] == "검증 불가"
+
+
+# ---------------------------------------------------------------- 불균형 전표 검토 상세
+def test_불균형_전표_목록에_판정_계정_파일행번호_표시():
+    result, df = _run(MIXED)
+    table = A.unbalanced_vouchers(df, result.excluded_detail)
+    assert len(table) == 1
+    row = table.iloc[0]
+    assert row["전표번호"] == "J2" and row["판정"] == "분개 오류 의심 - 검토 필요"
+    assert row["차변 합계"] == 500 and row["대변 합계"] == 400 and row["차이"] == 100
+    assert row["포함 계정"] == "131 원재료, 251 외상매입금"
+    assert row["파일 행 번호"] == "4, 5"
+
+
+def test_불균형_판정은_오류로_확정하지_않는_표현():
+    assert "의심" in A.REVIEW_LABEL and "검토 필요" in A.REVIEW_LABEL and "확정" not in A.REVIEW_LABEL
+    result, _ = _run(MIXED)
+    v8 = [i for i in result.issues if i["항목"] == "전표별 차대 균형"][0]
+    assert "분개 오류 의심 - 검토 필요" in v8["문제"]
+
+
+def test_불균형_전표_라인_상세():
+    result, df = _run(MIXED)
+    lines = A.voucher_lines(df, "J2", result.excluded_detail)
+    assert list(lines["파일 행 번호"]) == [4, 5]
+    assert list(lines["구분"]) == ["분석 포함", "분석 포함"]
+    assert list(lines["계정코드"]) == ["131", "251"] and list(lines["계정과목명"]) == ["원재료", "외상매입금"]
+    assert lines["차변"].sum() == 500 and lines["대변"].sum() == 400
+
+
+def test_검증_불가_전표_목록과_라인_상세에_제외_사유():
+    result, df = _run(MIXED)
+    table = A.unverifiable_vouchers(df, result.excluded_detail).set_index("전표번호")
+    assert (table["판정"] == "검증 불가 - 제외 행 수정 후 재확인").all()
+    assert table.loc["J3", "분석에 남은 계정"] == "131 원재료"
+    assert table.loc["J5", "분석에 남은 계정"] == ""  # 모든 행이 제외됨
+
+    lines = A.voucher_lines(df, "J4", result.excluded_detail)
+    assert list(lines["파일 행 번호"]) == [8, 9, 10]
+    assert list(lines["구분"]) == ["분석 제외", "분석 제외", "분석 포함"]
+    assert lines.loc[0, "계정코드"] == "830" and lines.loc[0, "제외 사유"] == "차변금액 형식 오류('abc')"
+    assert lines.loc[1, "계정과목명"] == "보통예금" and lines.loc[1, "제외 사유"] == "계정코드 없음"
+    assert pd.isna(lines.loc[0, "차변"]) and lines.loc[2, "차변"] == 50
+
+
+def test_불균형_전표와_검증_불가_전표는_겹치지_않음():
+    result, df = _run(MIXED)
+    unbalanced = set(A.unbalanced_vouchers(df, result.excluded_detail)["전표번호"])
+    unverifiable = set(A.unverifiable_vouchers(df, result.excluded_detail)["전표번호"])
+    assert unbalanced == {"J2"} and unverifiable == {"J3", "J4", "J5"}
+    assert not unbalanced & unverifiable

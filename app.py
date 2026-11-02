@@ -5,12 +5,13 @@
 이상 징후 탐지·결과 다운로드는 다음 개발 단위에서 추가합니다.
 """
 
+import pandas as pd
 import streamlit as st
 
 from auditlens.analysis import (
-    CHART_UNIT, CHART_UNIT_LABEL, KEY_ACCOUNT_GROUPS, MEASURES, account_summary, accounts_in_group,
+    CHART_UNIT, CHART_UNIT_LABEL, KEY_ACCOUNT_GROUPS, MEASURES, REVIEW_LABEL, account_summary, accounts_in_group,
     compare_years, fiscal_years, key_account_summary, monthly_summary, overview, prepare,
-    unbalanced_vouchers, unverifiable_vouchers,
+    unbalanced_vouchers, unverifiable_vouchers, voucher_lines,
 )
 from auditlens.loader import LoadError, list_excel_sheets, read_uploaded_file
 from auditlens.sample_data import (
@@ -230,6 +231,20 @@ def date_only(table, column="회계처리일"):
     return table.assign(**{column: table[column].dt.strftime("%Y-%m-%d").fillna("")})
 
 
+def show_voucher_lines(je_id, excluded):
+    """전표 하나의 라인 상세(파일 행 번호, 계정, 차변·대변, 제외 사유)를 보여 줍니다."""
+    lines = voucher_lines(df, je_id, excluded)
+    shown = with_won(date_only(lines), ["차변", "대변"])
+    for col in ["차변 (원)", "대변 (원)"]:  # 제외된 행은 금액을 읽지 못했을 수 있으므로 빈칸
+        shown[col] = [f"{v:,.0f}" if pd.notna(v) else "" for v in shown[col]]
+    st.dataframe(shown, hide_index=True, use_container_width=True,
+                 column_config={"제외 사유": st.column_config.TextColumn(width="large")})
+    kept = lines[lines["구분"] == "분석 포함"]
+    st.caption(f"분석 포함 행 합계: 차변 {kept['차변'].sum():,.0f}원 · 대변 {kept['대변'].sum():,.0f}원 · "
+               f"차이 {kept['차변'].sum() - kept['대변'].sum():,.0f}원. 파일 행 번호는 올린 파일에서의 행 번호"
+               "(머리글이 1행)입니다.")
+
+
 def to_chart_unit(table, columns):
     return table[columns] / CHART_UNIT
 
@@ -262,27 +277,39 @@ with tab_overview:
 
     s1, s2, s3 = st.columns(3)
     s1.metric("균형 전표", f"{ov['균형 전표 수']:,}")
-    s2.metric("불균형 전표 (차이 확인됨)", f"{ov['불균형 전표 수']:,}")
+    s2.metric("불균형 전표 (검토 필요)", f"{ov['불균형 전표 수']:,}")
     s3.metric("검증 불가 전표 (제외 행 포함)", f"{ov['검증 불가 전표 수']:,}")
-    scope = "검증할 수 있는 전표는 모두" if ov["검증 불가 전표 수"] else "모든 전표에서"
     if ov["불균형 전표 수"] == 0:
+        scope = "검증할 수 있는 전표는 모두" if ov["검증 불가 전표 수"] else "모든 전표에서"
         st.success(f"② 전표별: {scope} 차변 합계와 대변 합계가 일치합니다 (1원 이하 차이 허용).")
-    else:
-        st.error(f"② 전표별 불균형: 제외된 행이 없는데도 차변·대변이 맞지 않는 전표가 {ov['불균형 전표 수']:,}개 "
-                 f"있습니다 (차이 절대값 합계 {ov['불균형 전표 차이 절대값 합계']:,.0f}원).")
-        with st.expander("불균형 전표 목록"):
-            st.dataframe(money(date_only(unbalanced_vouchers(df, excluded)), ["차변 합계", "대변 합계", "차이"]),
-                         hide_index=True, use_container_width=True)
+
+    if ov["불균형 전표 수"]:
+        with st.container(border=True):
+            st.markdown(f"#### ②-1 차대 불균형 전표 · {REVIEW_LABEL}")
+            st.error(f"제외된 행이 없는데도 차변 합계와 대변 합계가 다른 전표가 {ov['불균형 전표 수']:,}개 있습니다 "
+                     f"(차이 절대값 합계 {ov['불균형 전표 차이 절대값 합계']:,.0f}원). 분개 오류로 확정된 것이 "
+                     "아니라 증빙과 대조해 검토가 필요한 전표입니다.")
+            table = unbalanced_vouchers(df, excluded)
+            st.dataframe(money(date_only(table), ["차변 합계", "대변 합계", "차이"]), hide_index=True,
+                         use_container_width=True,
+                         column_config={"포함 계정": st.column_config.TextColumn(width="large")})
+            pick = st.selectbox("라인 상세를 볼 불균형 전표", table["전표번호"], key="unbalanced_pick")
+            show_voucher_lines(pick, excluded)
+
     if ov["검증 불가 전표 수"]:
-        st.warning(f"② 전표별 검증 불가: 검증에서 제외된 행이 포함된 전표가 {ov['검증 불가 전표 수']:,}개 있습니다. "
-                   "남은 행만으로는 균형 여부를 판단할 수 없어 불균형 전표로 세지 않았습니다. 아래 제외 사유를 "
-                   "고쳐 다시 올리면 확인할 수 있습니다.", icon="🔍")
-        with st.expander("검증 불가 전표 목록과 제외 사유", expanded=True):
-            st.dataframe(money(date_only(unverifiable_vouchers(df, excluded)), ["차변 합계", "대변 합계", "차이"]),
-                         hide_index=True, use_container_width=True,
+        with st.container(border=True):
+            st.markdown("#### ②-2 검증 불가 전표 · 제외 행 수정 후 재확인")
+            st.warning(f"검증에서 제외된 행이 포함된 전표가 {ov['검증 불가 전표 수']:,}개 있습니다. 남은 행만으로는 "
+                       "균형 여부를 판단할 수 없어 위 불균형 전표에 넣지 않았습니다. 제외 사유를 고쳐 다시 올리면 "
+                       "확인할 수 있습니다.", icon="🔍")
+            table = unverifiable_vouchers(df, excluded)
+            st.dataframe(money(date_only(table), ["차변 합계", "대변 합계", "차이"]), hide_index=True,
+                         use_container_width=True,
                          column_config={"제외 사유": st.column_config.TextColumn(width="large")})
-            st.caption("라인 수·금액·차이는 분석에 남은 행만으로 계산한 값입니다. 제외 사유의 행 번호는 "
-                       "올린 파일에서의 행 번호(머리글이 1행)입니다.")
+            st.caption("라인 수·금액·차이는 분석에 남은 행만으로 계산한 값입니다.")
+            pick = st.selectbox("라인 상세를 볼 검증 불가 전표", table["전표번호"], key="unverifiable_pick")
+            show_voucher_lines(pick, excluded)
+
     if ov["전표번호 없는 제외 행 수"]:
         st.caption(f"전표번호가 비어 있어 어느 전표인지 알 수 없는 제외 행이 {ov['전표번호 없는 제외 행 수']:,}개 "
                    "있습니다. 이 행들은 어느 전표의 판정에도 반영되지 않았습니다.")

@@ -35,7 +35,7 @@ class ValidationResult:
     issues: list = field(default_factory=list)
     clean: pd.DataFrame = None  # 표준 열 이름, 변환된 자료형, 제외 행이 빠진 표
     excluded_rows: list = field(default_factory=list)  # 분석에서 제외한 파일 행 번호
-    excluded_detail: pd.DataFrame = None  # 제외한 행의 파일 행 번호(file_row), 전표번호(je_id), 사유
+    excluded_detail: pd.DataFrame = None  # 제외한 행의 파일 행 번호·전표번호·계정코드·계정과목명·사유
     summary: dict = field(default_factory=dict)
 
     @property
@@ -303,9 +303,12 @@ def validate_journal(raw: pd.DataFrame, mapping: dict) -> ValidationResult:
     work["account_code"] = work["account_code"].map(_normalize_code)
     work["je_id"] = work["je_id"].map(lambda v: "" if _is_blank(v) else str(v).strip())
     result.excluded_detail = pd.DataFrame(
-        [{"file_row": file_row_number(i), "je_id": work.at[i, "je_id"], "사유": ", ".join(reasons[i])}
+        [{"file_row": file_row_number(i), "je_id": work.at[i, "je_id"],
+          "account_code": work.at[i, "account_code"],
+          "account_name": "" if _is_blank(work.at[i, "account_name"]) else str(work.at[i, "account_name"]).strip(),
+          "사유": ", ".join(reasons[i])}
          for i in sorted(reasons)],
-        columns=["file_row", "je_id", "사유"],
+        columns=["file_row", "je_id", "account_code", "account_name", "사유"],
     )
 
     # V9 완전히 같은 행 (원본 파일의 모든 열 기준)
@@ -338,7 +341,7 @@ def validate_journal(raw: pd.DataFrame, mapping: dict) -> ValidationResult:
         shown = ", ".join(f"{je}(차이 {d:,.0f}원)" for je, d in unbalanced.head(MAX_EXAMPLES).items())
         more = len(unbalanced) - min(len(unbalanced), MAX_EXAMPLES)
         _add(result, WARNING, "V8", "전표별 차대 균형",
-             f"차변 합계와 대변 합계가 다른 전표가 {len(unbalanced)}개 있습니다: "
+             f"차변 합계와 대변 합계가 다른 전표가 {len(unbalanced)}개 있습니다(분개 오류 의심 - 검토 필요): "
              f"{shown}{f' 외 {more}개' if more else ''}",
              "해당 전표의 라인이 빠졌거나 금액이 잘못 입력되었는지 확인해 주세요.",
              list(unbalanced.index), "")

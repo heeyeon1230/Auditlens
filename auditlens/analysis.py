@@ -132,18 +132,68 @@ def voucher_status(df: pd.DataFrame, excluded=None):
     return table[STATUS_COLUMNS].reset_index(drop=True)
 
 
+REVIEW_LABEL = "분개 오류 의심 - 검토 필요"
+UNVERIFIABLE_LABEL = "검증 불가 - 제외 행 수정 후 재확인"
+
+
+def _voucher_line_summary(df):
+    """전표번호별 포함 계정("131 원재료, 251 외상매입금")과 파일 행 번호("102, 103")."""
+    if len(df) == 0 or "file_row" not in df:
+        return {}, {}
+    accounts, rows = {}, {}
+    for je, part in df.sort_values("file_row").groupby("je_id", sort=False):
+        pairs = dict.fromkeys(f"{c} {n}".strip() for c, n in zip(part["account_code"], part["account_name"]))
+        accounts[je] = ", ".join(pairs)
+        rows[je] = ", ".join(str(r) for r in part["file_row"])
+    return accounts, rows
+
+
 def unbalanced_vouchers(df: pd.DataFrame, excluded=None):
-    """제외된 행이 없는데 차변 합계와 대변 합계의 차이가 허용액(1원)을 넘는 전표 (실제 불균형)."""
+    """제외된 행이 없는데 차변 합계와 대변 합계의 차이가 허용액(1원)을 넘는 전표 (실제 불균형).
+
+    판정은 오류 확정이 아니라 '분개 오류 의심 - 검토 필요'입니다. 포함 계정과 파일 행 번호를 함께 돌려줍니다.
+    """
     table = voucher_status(df, excluded)
-    columns = ["전표번호", "회계처리일", "라인 수", "차변 합계", "대변 합계", "차이"]
-    return table.loc[table["상태"] == UNBALANCED, columns].reset_index(drop=True)
+    table = table[table["상태"] == UNBALANCED].copy()
+    accounts, rows = _voucher_line_summary(df)
+    table["판정"] = REVIEW_LABEL
+    table["포함 계정"] = [accounts.get(je, "") for je in table["전표번호"]]
+    table["파일 행 번호"] = [rows.get(je, "") for je in table["전표번호"]]
+    columns = ["전표번호", "판정", "회계처리일", "파일 행 번호", "라인 수", "차변 합계", "대변 합계", "차이", "포함 계정"]
+    return table[columns].reset_index(drop=True)
 
 
 def unverifiable_vouchers(df: pd.DataFrame, excluded=None):
     """검증에서 제외된 행이 포함되어 차대 균형을 확정할 수 없는 전표와 제외 사유."""
     table = voucher_status(df, excluded)
-    columns = ["전표번호", "회계처리일", "라인 수", "제외 행 수", "차변 합계", "대변 합계", "차이", "제외 사유"]
-    return table.loc[table["상태"] == UNVERIFIABLE, columns].reset_index(drop=True)
+    table = table[table["상태"] == UNVERIFIABLE].copy()
+    accounts, rows = _voucher_line_summary(df)
+    table["판정"] = UNVERIFIABLE_LABEL
+    table["분석에 남은 계정"] = [accounts.get(je, "") for je in table["전표번호"]]
+    columns = ["전표번호", "제외 사유", "판정", "회계처리일", "라인 수", "제외 행 수", "차변 합계", "대변 합계", "차이",
+               "분석에 남은 계정"]
+    return table[columns].reset_index(drop=True)
+
+
+def voucher_lines(df: pd.DataFrame, je_id, excluded=None):
+    """전표 하나의 라인 상세. 분석에 포함된 행과 검증에서 제외된 행을 파일 행 번호 순서로 보여 줍니다.
+
+    제외된 행은 금액을 읽을 수 없었을 수 있으므로 차변·대변을 비워 두고 제외 사유를 적습니다.
+    """
+    columns = ["파일 행 번호", "구분", "회계처리일", "계정코드", "계정과목명", "차변", "대변", "제외 사유"]
+    rows = []
+    part = df[df["je_id"] == je_id] if len(df) else df
+    for r in part.itertuples(index=False):
+        rows.append({"파일 행 번호": getattr(r, "file_row", None), "구분": "분석 포함",
+                     "회계처리일": r.posting_date, "계정코드": r.account_code, "계정과목명": r.account_name,
+                     "차변": r.debit, "대변": r.credit, "제외 사유": ""})
+    if excluded is not None and len(excluded):
+        for r in excluded[excluded["je_id"] == je_id].itertuples(index=False):
+            rows.append({"파일 행 번호": r.file_row, "구분": "분석 제외", "회계처리일": pd.NaT,
+                         "계정코드": r.account_code, "계정과목명": r.account_name,
+                         "차변": float("nan"), "대변": float("nan"), "제외 사유": r.사유})
+    table = pd.DataFrame(rows, columns=columns)
+    return table.sort_values("파일 행 번호", kind="stable").reset_index(drop=True)
 
 
 def overview(df: pd.DataFrame, excluded=None):

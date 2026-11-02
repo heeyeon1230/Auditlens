@@ -66,3 +66,38 @@ def test_분석표_금액_열에_단위_표시():
     at.selectbox(key="analysis_measure").select("전표 수").run()
     headers = [list(d.value.columns) for d in at.dataframe]
     assert any("전기 2024년 (건)" in h for h in headers)
+
+
+REVIEW_CSV = (
+    "전표번호,회계처리일,계정코드,계정과목명,차변금액,대변금액\n"
+    "J1,2025-01-02,131,원재료,1000,\n"
+    "J1,2025-01-02,251,외상매입금,,1000\n"
+    "J2,2025-01-03,131,원재료,500,\n"
+    "J2,2025-01-03,251,외상매입금,,400\n"
+    "J3,2025-01-04,131,원재료,700,\n"
+    "J3,2025-02-30,251,외상매입금,,700\n"
+).encode("utf-8")
+
+
+def test_불균형과_검증_불가_전표를_나눠_표시():
+    at = AppTest.from_file(APP, default_timeout=120).run()
+    at.radio[0].set_value("내 파일 업로드").run()
+    at.file_uploader[0].upload("검토.csv", REVIEW_CSV, "text/csv").run()
+    assert not at.exception
+    headings = [m.value for m in at.markdown]
+    assert any("②-1 차대 불균형 전표 · 분개 오류 의심 - 검토 필요" in h for h in headings)
+    assert any("②-2 검증 불가 전표" in h for h in headings)
+    assert any("분개 오류로 확정된 것이 아니라" in e.value for e in at.error)
+    assert any("제외된 행이 포함된 전표가 1개" in w.value for w in at.warning)
+
+    tables = [d.value for d in at.dataframe]
+    unbalanced = next(t for t in tables if "포함 계정" in t.columns)
+    assert list(unbalanced["전표번호"]) == ["J2"]
+    assert list(unbalanced["판정"]) == ["분개 오류 의심 - 검토 필요"]
+    assert list(unbalanced["파일 행 번호"]) == ["4, 5"]
+    unverifiable = next(t for t in tables if "제외 사유" in t.columns and "판정" in t.columns)
+    assert list(unverifiable["전표번호"]) == ["J3"]
+    assert unverifiable["제외 사유"].iloc[0] == "7행 회계처리일 형식 오류('2025-02-30')"
+    details = [t for t in tables if "구분" in t.columns]
+    assert list(details[0]["파일 행 번호"]) == [4, 5]  # 불균형 전표 J2의 라인
+    assert list(details[1]["구분"]) == ["분석 포함", "분석 제외"]  # 검증 불가 전표 J3의 라인
