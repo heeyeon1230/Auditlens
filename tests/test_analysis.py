@@ -375,3 +375,87 @@ def test_샘플_분개장_원본과_계정별_월별_건수_대사():
         assert lines.loc[f"{month}월", "당기"] == by_month[(2025, month)][0]
         assert debit.loc[f"{month}월", "전기"] == by_month[(2024, month)][1]
         assert debit.loc[f"{month}월", "당기"] == by_month[(2025, month)][1]
+
+
+# ---------------------------------------------------------------- 검증 불가 전표 (제외된 행이 포함된 전표)
+def _run(rows):
+    raw = pd.DataFrame(rows, columns=list(MAPPING), dtype=object)
+    result = validate_journal(raw, MAPPING)
+    df, _ = A.prepare(result.clean)
+    return result, df
+
+
+MIXED = [
+    # J1: 정상 균형 전표
+    ("J1", "2025-01-02", "131", "원재료", "1000", ""),
+    ("J1", "2025-01-02", "251", "외상매입금", "", "1000"),
+    # J2: 제외 행 없는 실제 불균형 (차이 100원)
+    ("J2", "2025-01-03", "131", "원재료", "500", ""),
+    ("J2", "2025-01-03", "251", "외상매입금", "", "400"),
+    # J3: 원래 균형이지만 대변 행의 날짜가 잘못되어 제외됨 → 검증 불가
+    ("J3", "2025-01-04", "131", "원재료", "700", ""),
+    ("J3", "2025-02-30", "251", "외상매입금", "", "700"),
+    # J4: 금액 형식 오류 행과 계정코드가 빈 행이 제외됨 → 검증 불가
+    ("J4", "2025-01-05", "830", "소모품비", "abc", ""),
+    ("J4", "2025-01-05", "", "보통예금", "", "300"),
+    ("J4", "2025-01-05", "830", "소모품비", "50", ""),
+    # J5: 모든 행이 제외됨 (회계처리일 없음) → 검증 불가, 분석 라인 0
+    ("J5", "", "131", "원재료", "200", ""),
+    ("J5", "", "251", "외상매입금", "", "200"),
+    # 전표번호가 빈 행 → 어느 전표인지 알 수 없음
+    ("", "2025-01-06", "131", "원재료", "10", ""),
+]
+
+
+def test_제외된_행이_포함된_전표는_불균형으로_집계되지_않음():
+    result, df = _run(MIXED)
+    status = dict(zip(*A.voucher_status(df, result.excluded_detail)[["전표번호", "상태"]].T.values))
+    assert status == {"J1": "균형", "J2": "불균형", "J3": "검증 불가", "J4": "검증 불가", "J5": "검증 불가"}
+    ov = A.overview(df, result.excluded_detail)
+    assert ov["불균형 전표 수"] == 1 and ov["균형 전표 수"] == 1 and ov["검증 불가 전표 수"] == 3
+    assert list(A.unbalanced_vouchers(df, result.excluded_detail)["전표번호"]) == ["J2"]
+    # 검증 단계 V8도 같은 기준: 불균형 경고에는 J2만, 검증 불가는 따로
+    v8 = {i["항목"]: i for i in result.issues if i["코드"] == "V8"}
+    assert "1개" in v8["전표별 차대 균형"]["문제"] and "J2" in v8["전표별 차대 균형"]["문제"]
+    assert "J3" not in v8["전표별 차대 균형"]["문제"]
+    assert "3개" in v8["전표별 차대 균형 (검증 불가)"]["문제"]
+
+
+def test_제외_행을_고려하지_않으면_불균형으로_잘못_집계됨():
+    # excluded를 주지 않으면 예전 방식(남은 행만으로 판정)이 되어 J3·J4가 불균형으로 잡힙니다.
+    result, df = _run(MIXED)
+    assert sorted(A.unbalanced_vouchers(df)["전표번호"]) == ["J2", "J3", "J4"]
+
+
+def test_실제_불균형_전표는_기존처럼_탐지됨():
+    result, df = _run(MIXED[:4])  # 제외 행이 없는 J1·J2
+    assert result.excluded_detail.empty
+    table = A.unbalanced_vouchers(df, result.excluded_detail)
+    assert list(table["전표번호"]) == ["J2"] and table.loc[0, "차이"] == 100
+    ov = A.overview(df, result.excluded_detail)
+    assert ov["불균형 전표 수"] == 1 and ov["검증 불가 전표 수"] == 0
+    assert ov == {**A.overview(df), "균형 전표 수": 1}  # excluded 유무와 관계없이 같은 결과
+
+
+def test_제외_사유가_전표별로_표시됨():
+    result, df = _run(MIXED)
+    detail = result.excluded_detail.set_index("file_row")
+    assert detail.loc[7, "사유"] == "회계처리일 형식 오류('2025-02-30')"
+    assert detail.loc[8, "사유"] == "차변금액 형식 오류('abc')"
+    assert detail.loc[9, "사유"] == "계정코드 없음"
+    assert detail.loc[11, "사유"] == "회계처리일 없음"
+    assert detail.loc[13, "je_id"] == "" and detail.loc[13, "사유"] == "전표번호 없음"
+
+    table = A.unverifiable_vouchers(df, result.excluded_detail).set_index("전표번호")
+    assert table.loc["J3", "제외 사유"] == "7행 회계처리일 형식 오류('2025-02-30')"
+    assert table.loc["J4", "제외 사유"] == "8행 차변금액 형식 오류('abc') / 9행 계정코드 없음"
+    assert table.loc["J4", "제외 행 수"] == 2 and table.loc["J4", "라인 수"] == 1
+    assert table.loc["J5", "라인 수"] == 0 and table.loc["J5", "제외 행 수"] == 2
+    assert A.overview(df, result.excluded_detail)["전표번호 없는 제외 행 수"] == 1
+
+
+def test_한_행에_사유가_여러_개면_모두_표시():
+    rows = [("J1", "2025-13-01", "131", "원재료", "abc", ""), ("J1", "2025-01-01", "251", "외상매입금", "", "1")]
+    result, df = _run(rows)
+    assert result.excluded_detail.loc[0, "사유"] == "회계처리일 형식 오류('2025-13-01'), 차변금액 형식 오류('abc')"
+    assert A.voucher_status(df, result.excluded_detail).loc[0, "상태"] == "검증 불가"

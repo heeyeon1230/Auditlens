@@ -88,17 +88,75 @@ def voucher_balance(df: pd.DataFrame):
     return table.reset_index().rename(columns={"je_id": "전표번호"})
 
 
-def unbalanced_vouchers(df: pd.DataFrame):
-    """차변 합계와 대변 합계의 차이가 허용액(1원)을 넘는 전표."""
+BALANCED, UNBALANCED, UNVERIFIABLE = "균형", "불균형", "검증 불가"
+STATUS_COLUMNS = ["전표번호", "상태", "회계처리일", "라인 수", "제외 행 수", "차변 합계", "대변 합계", "차이", "제외 사유"]
+
+
+def _excluded_by_voucher(excluded):
+    """검증에서 제외한 행을 전표번호별로 모읍니다. 전표번호가 빈 행은 어느 전표인지 알 수 없어 빠집니다.
+
+    excluded: validation 결과의 excluded_detail (file_row, je_id, 사유). None이면 제외 행이 없는 것으로 봅니다.
+    반환값: {전표번호: (제외 행 수, "12행 회계처리일 형식 오류('2025-02-30') / ...")}
+    """
+    if excluded is None or len(excluded) == 0:
+        return {}
+    grouped = {}
+    for row in excluded.itertuples(index=False):
+        if row.je_id:
+            grouped.setdefault(row.je_id, []).append(f"{row.file_row}행 {row.사유}")
+    return {je: (len(items), " / ".join(items)) for je, items in grouped.items()}
+
+
+def voucher_status(df: pd.DataFrame, excluded=None):
+    """전표마다 균형·불균형·검증 불가를 판정합니다.
+
+    - 검증 불가: 검증에서 제외된 행이 하나라도 있는 전표. 남은 행만으로는 균형 여부를 확정할 수 없으므로
+      불균형으로 세지 않습니다. 모든 행이 제외된 전표도 여기에 들어갑니다(라인 수 0).
+    - 불균형: 제외된 행이 없고, 차변 합계와 대변 합계의 차이가 허용액(1원)을 넘는 전표.
+    - 균형: 그 밖의 전표.
+    금액과 차이는 분석에 남은 행만으로 계산한 값입니다.
+    """
     table = voucher_balance(df)
-    return table[table["차이"].abs() > BALANCE_TOLERANCE].reset_index(drop=True)
+    by_voucher = _excluded_by_voucher(excluded)
+    missing = sorted(set(by_voucher) - set(table["전표번호"]))
+    if missing:
+        empty = pd.DataFrame({"전표번호": missing, "회계처리일": pd.NaT, "라인 수": 0,
+                              "차변 합계": 0.0, "대변 합계": 0.0, "차이": 0.0})
+        table = pd.concat([table, empty], ignore_index=True) if len(table) else empty
+    table["제외 행 수"] = [by_voucher.get(je, (0, ""))[0] for je in table["전표번호"]]
+    table["제외 사유"] = [by_voucher.get(je, (0, ""))[1] for je in table["전표번호"]]
+    table["상태"] = [
+        UNVERIFIABLE if n else (UNBALANCED if abs(d) > BALANCE_TOLERANCE else BALANCED)
+        for n, d in zip(table["제외 행 수"], table["차이"])
+    ]
+    return table[STATUS_COLUMNS].reset_index(drop=True)
 
 
-def overview(df: pd.DataFrame):
-    """전표 현황 요약. 데이터가 없으면 건수·금액 0, 기간 None을 돌려줍니다."""
+def unbalanced_vouchers(df: pd.DataFrame, excluded=None):
+    """제외된 행이 없는데 차변 합계와 대변 합계의 차이가 허용액(1원)을 넘는 전표 (실제 불균형)."""
+    table = voucher_status(df, excluded)
+    columns = ["전표번호", "회계처리일", "라인 수", "차변 합계", "대변 합계", "차이"]
+    return table.loc[table["상태"] == UNBALANCED, columns].reset_index(drop=True)
+
+
+def unverifiable_vouchers(df: pd.DataFrame, excluded=None):
+    """검증에서 제외된 행이 포함되어 차대 균형을 확정할 수 없는 전표와 제외 사유."""
+    table = voucher_status(df, excluded)
+    columns = ["전표번호", "회계처리일", "라인 수", "제외 행 수", "차변 합계", "대변 합계", "차이", "제외 사유"]
+    return table.loc[table["상태"] == UNVERIFIABLE, columns].reset_index(drop=True)
+
+
+def overview(df: pd.DataFrame, excluded=None):
+    """전표 현황 요약. 데이터가 없으면 건수·금액 0, 기간 None을 돌려줍니다.
+
+    excluded를 주면 제외된 행이 포함된 전표를 '검증 불가'로 따로 세고 불균형 전표 수에서 뺍니다.
+    """
     total_dr = float(df["debit"].sum()) if len(df) else 0.0
     total_cr = float(df["credit"].sum()) if len(df) else 0.0
-    unbalanced = unbalanced_vouchers(df)
+    status = voucher_status(df, excluded)
+    unbalanced = status[status["상태"] == UNBALANCED]
+    unverifiable = status[status["상태"] == UNVERIFIABLE]
+    no_voucher = 0 if excluded is None or len(excluded) == 0 else int((excluded["je_id"] == "").sum())
     return {
         "라인 수": int(len(df)),
         "전표 수": int(df["je_id"].nunique()) if len(df) else 0,
@@ -110,8 +168,12 @@ def overview(df: pd.DataFrame):
         "총 대변": total_cr,
         "차이": total_dr - total_cr,
         "합계 일치": abs(total_dr - total_cr) <= BALANCE_TOLERANCE,
+        "균형 전표 수": int((status["상태"] == BALANCED).sum()),
         "불균형 전표 수": int(len(unbalanced)),
         "불균형 전표 차이 절대값 합계": float(unbalanced["차이"].abs().sum()) if len(unbalanced) else 0.0,
+        "검증 불가 전표 수": int(len(unverifiable)),
+        "검증 불가 전표 차이 합계": float(unverifiable["차이"].sum()) if len(unverifiable) else 0.0,
+        "전표번호 없는 제외 행 수": no_voucher,
     }
 
 

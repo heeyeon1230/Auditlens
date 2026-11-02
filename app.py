@@ -10,7 +10,7 @@ import streamlit as st
 from auditlens.analysis import (
     CHART_UNIT, CHART_UNIT_LABEL, KEY_ACCOUNT_GROUPS, MEASURES, account_summary, accounts_in_group,
     compare_years, fiscal_years, key_account_summary, monthly_summary, overview, prepare,
-    unbalanced_vouchers,
+    unbalanced_vouchers, unverifiable_vouchers,
 )
 from auditlens.loader import LoadError, list_excel_sheets, read_uploaded_file
 from auditlens.sample_data import (
@@ -225,6 +225,11 @@ def money(table, columns):
     return with_won(table, columns).style.format("{:,.0f}", subset=[f"{c} (원)" for c in columns], na_rep="")
 
 
+def date_only(table, column="회계처리일"):
+    """날짜 열을 YYYY-MM-DD 글자로 바꿔 보여 줍니다. 날짜가 없으면 빈칸입니다."""
+    return table.assign(**{column: table[column].dt.strftime("%Y-%m-%d").fillna("")})
+
+
 def to_chart_unit(table, columns):
     return table[columns] / CHART_UNIT
 
@@ -232,7 +237,8 @@ def to_chart_unit(table, columns):
 tab_overview, tab_account, tab_month = st.tabs(["전표 현황", "계정별 분석", "월별 분석·전기 비교"])
 
 with tab_overview:
-    ov = overview(df)
+    excluded = result.excluded_detail
+    ov = overview(df, excluded)
     c1, c2, c3, c4 = st.columns(4)
     c1.metric("전표 수", f"{ov['전표 수']:,}")
     c2.metric("분개 라인 수", f"{ov['라인 수']:,}")
@@ -250,15 +256,36 @@ with tab_overview:
         st.success("① 전체 합계: 차변 합계와 대변 합계가 일치합니다 (1원 이하 차이 허용).")
     else:
         st.warning(f"① 전체 합계: 차변 합계와 대변 합계가 {abs(ov['차이']):,.0f}원 다릅니다.")
+    if result.excluded_rows:
+        st.caption(f"검증에서 제외한 {len(result.excluded_rows):,}행은 ① 합계에 들어 있지 않습니다. 위 차이 중 "
+                   f"{ov['검증 불가 전표 차이 합계']:,.0f}원은 아래 '검증 불가' 전표에서 생긴 것입니다.")
+
+    s1, s2, s3 = st.columns(3)
+    s1.metric("균형 전표", f"{ov['균형 전표 수']:,}")
+    s2.metric("불균형 전표 (차이 확인됨)", f"{ov['불균형 전표 수']:,}")
+    s3.metric("검증 불가 전표 (제외 행 포함)", f"{ov['검증 불가 전표 수']:,}")
+    scope = "검증할 수 있는 전표는 모두" if ov["검증 불가 전표 수"] else "모든 전표에서"
     if ov["불균형 전표 수"] == 0:
-        st.success("② 전표별: 모든 전표에서 차변 합계와 대변 합계가 일치합니다 (1원 이하 차이 허용).")
+        st.success(f"② 전표별: {scope} 차변 합계와 대변 합계가 일치합니다 (1원 이하 차이 허용).")
     else:
-        st.warning(f"② 전표별: 차변·대변이 맞지 않는 전표가 {ov['불균형 전표 수']:,}개 있습니다 "
-                   f"(차이 절대값 합계 {ov['불균형 전표 차이 절대값 합계']:,.0f}원).")
-        unbalanced = unbalanced_vouchers(df)
+        st.error(f"② 전표별 불균형: 제외된 행이 없는데도 차변·대변이 맞지 않는 전표가 {ov['불균형 전표 수']:,}개 "
+                 f"있습니다 (차이 절대값 합계 {ov['불균형 전표 차이 절대값 합계']:,.0f}원).")
         with st.expander("불균형 전표 목록"):
-            st.dataframe(money(unbalanced, ["차변 합계", "대변 합계", "차이"]), hide_index=True,
-                         use_container_width=True)
+            st.dataframe(money(date_only(unbalanced_vouchers(df, excluded)), ["차변 합계", "대변 합계", "차이"]),
+                         hide_index=True, use_container_width=True)
+    if ov["검증 불가 전표 수"]:
+        st.warning(f"② 전표별 검증 불가: 검증에서 제외된 행이 포함된 전표가 {ov['검증 불가 전표 수']:,}개 있습니다. "
+                   "남은 행만으로는 균형 여부를 판단할 수 없어 불균형 전표로 세지 않았습니다. 아래 제외 사유를 "
+                   "고쳐 다시 올리면 확인할 수 있습니다.", icon="🔍")
+        with st.expander("검증 불가 전표 목록과 제외 사유", expanded=True):
+            st.dataframe(money(date_only(unverifiable_vouchers(df, excluded)), ["차변 합계", "대변 합계", "차이"]),
+                         hide_index=True, use_container_width=True,
+                         column_config={"제외 사유": st.column_config.TextColumn(width="large")})
+            st.caption("라인 수·금액·차이는 분석에 남은 행만으로 계산한 값입니다. 제외 사유의 행 번호는 "
+                       "올린 파일에서의 행 번호(머리글이 1행)입니다.")
+    if ov["전표번호 없는 제외 행 수"]:
+        st.caption(f"전표번호가 비어 있어 어느 전표인지 알 수 없는 제외 행이 {ov['전표번호 없는 제외 행 수']:,}개 "
+                   "있습니다. 이 행들은 어느 전표의 판정에도 반영되지 않았습니다.")
     st.info(
         "**읽는 법**: ①이 일치해도 ②에서 불균형 전표가 있을 수 있습니다. 한 전표의 차이가 다른 전표의 반대 차이와 "
         "상쇄되면 전체 합계는 맞아 보이기 때문입니다. 또한 ①과 ②가 모두 일치해도 계정 분류, 금액, 회계기간이 "
