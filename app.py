@@ -215,9 +215,14 @@ if len(df) == 0:
     st.stop()
 
 
+def with_won(table, columns):
+    """금액 열 이름 뒤에 단위 '(원)'을 붙입니다(값은 바꾸지 않음)."""
+    return table.rename(columns={c: f"{c} (원)" for c in columns})
+
+
 def money(table, columns):
-    """금액 열에 천 단위 쉼표를 붙여 보여 줍니다(값 자체는 바꾸지 않음)."""
-    return table.style.format("{:,.0f}", subset=columns, na_rep="")
+    """금액 열 이름에 '(원)'을 붙이고 천 단위 쉼표로 보여 줍니다(값 자체는 바꾸지 않음)."""
+    return with_won(table, columns).style.format("{:,.0f}", subset=[f"{c} (원)" for c in columns], na_rep="")
 
 
 def to_chart_unit(table, columns):
@@ -294,7 +299,8 @@ with tab_account:
     money_cols = ["차변 합계", "대변 합계", "순액(차변-대변)", "라인 금액 평균", "라인 금액 중앙값",
                   "라인 금액 최소", "라인 금액 최대"]
     st.dataframe(money(accounts, money_cols), hide_index=True, use_container_width=True)
-    st.download_button("계정별 분석 CSV 내려받기", accounts.to_csv(index=False).encode("utf-8-sig"),
+    st.download_button("계정별 분석 CSV 내려받기",
+                       with_won(accounts, money_cols).to_csv(index=False).encode("utf-8-sig"),
                        "계정별분석.csv", "text/csv")
 
 with tab_month:
@@ -337,8 +343,10 @@ with tab_month:
             chart = chart / CHART_UNIT
         st.bar_chart(chart, stack=False, x_label="월",
                      y_label=f"{measure} ({CHART_UNIT_LABEL if is_amount else '건'})")
-        fmt = "{:,.0f}"
-        st.dataframe(table.style.format(fmt, subset=["전기", "당기", "증감"])
+        unit = "원" if is_amount else "건"
+        shown = table.rename(columns={"전기": f"전기 {prior}년 ({unit})", "당기": f"당기 {current}년 ({unit})",
+                                      "증감": f"증감 ({unit})"})
+        st.dataframe(shown.style.format("{:,.0f}", subset=list(shown.columns[1:4]))
                      .format("{:,.1f}", subset=["증감률(%)"], na_rep=""),
                      hide_index=True, use_container_width=True)
         st.caption("같은 달끼리 비교합니다. 증감 = 당기 - 전기, 증감률 = 증감 ÷ 전기 × 100. 전기 값이 0이면 증감률은 "

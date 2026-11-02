@@ -56,3 +56,13 @@ def test_검증_오류가_있으면_분석_대신_안내():
     assert not at.exception
     assert any("기초 분석이 표시됩니다" in i.value for i in at.info)
     assert not at.tabs
+
+
+def test_분석표_금액_열에_단위_표시():
+    at = AppTest.from_file(APP, default_timeout=120).run()
+    headers = [list(d.value.columns) for d in at.dataframe]
+    assert any("차변 합계 (원)" in h for h in headers)
+    assert any("전기 2024년 (원)" in h and "증감 (원)" in h for h in headers)
+    at.selectbox(key="analysis_measure").select("전표 수").run()
+    headers = [list(d.value.columns) for d in at.dataframe]
+    assert any("전기 2024년 (건)" in h for h in headers)

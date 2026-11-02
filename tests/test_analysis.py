@@ -323,3 +323,55 @@ def test_전기_자료가_전혀_없는_연도와_비교():
     assert pd.isna(table.loc["1월", "증감률(%)"])
     assert table.loc["1월", "비고"] == "전기 자료 없음"
     assert table.loc["합계", "비고"] == ""
+
+
+# ---------------------------------------------------------------- 원본 분개장과 대사 (PR 2 검토)
+def test_샘플_분개장_원본과_계정별_월별_건수_대사():
+    """원본 CSV를 csv 모듈로 직접 더한 값과, 앱과 같은 경로(읽기→검증→분석)의 결과를 비교합니다."""
+    import csv
+    import io
+    from collections import defaultdict
+
+    from auditlens.loader import read_uploaded_file
+    from auditlens.sample_data import generate_sample_journal, journal_to_csv_bytes
+    from auditlens.schema import suggest_mapping
+
+    data = journal_to_csv_bytes(generate_sample_journal()[0])
+    rows = list(csv.DictReader(io.StringIO(data.decode("utf-8-sig"))))
+    by_account = defaultdict(lambda: [0, 0, 0])  # 라인 수, 차변, 대변 (원 단위 정수)
+    by_month = defaultdict(lambda: [0, 0])  # 라인 수, 차변
+    for r in rows:
+        dr, cr = int(r["차변금액"] or 0), int(r["대변금액"] or 0)
+        a = by_account[r["계정코드"]]
+        a[0] += 1
+        a[1] += dr
+        a[2] += cr
+        m = by_month[(int(r["회계처리일"][:4]), int(r["회계처리일"][5:7]))]
+        m[0] += 1
+        m[1] += dr
+
+    raw, _ = read_uploaded_file("sample.csv", data)
+    result = validate_journal(raw, suggest_mapping(raw.columns))
+    df, notes = A.prepare(result.clean)
+    assert notes == [] and result.excluded_rows == []
+
+    # 4. 건수: 라인 수·전표 수가 원본과 같음
+    ov = A.overview(df)
+    assert ov["라인 수"] == len(rows)
+    assert ov["전표 수"] == len({r["전표번호"] for r in rows})
+
+    # 1. 계정별 라인 수·차변·대변 합계가 원본과 같음
+    table = A.account_summary(df).set_index("계정코드")
+    assert set(table.index) == set(by_account)
+    for code, (n, dr, cr) in by_account.items():
+        assert table.loc[code, "라인 수"] == n
+        assert table.loc[code, "차변 합계"] == dr and table.loc[code, "대변 합계"] == cr
+
+    # 2. 전기·당기 같은 달 비교가 원본의 해당 연월 값과 같음
+    lines = A.compare_years(df, 2024, 2025, "라인 수").set_index("월")
+    debit = A.compare_years(df, 2024, 2025, "차변 합계").set_index("월")
+    for month in range(1, 13):
+        assert lines.loc[f"{month}월", "전기"] == by_month[(2024, month)][0]
+        assert lines.loc[f"{month}월", "당기"] == by_month[(2025, month)][0]
+        assert debit.loc[f"{month}월", "전기"] == by_month[(2024, month)][1]
+        assert debit.loc[f"{month}월", "당기"] == by_month[(2025, month)][1]
