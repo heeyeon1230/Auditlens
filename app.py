@@ -526,7 +526,8 @@ with st.container(border=True):
         st.markdown("**처리 현황**: 모든 라인이 아래 구분 중 하나에 들어갑니다.")
         st.dataframe(det.r2a_status, hide_index=True, use_container_width=True,
                      column_config={"설명": st.column_config.TextColumn(width="large")})
-        st.caption(f"적용 방법: 같은 거래처·계정·방향에서 회계처리일이 이 라인보다 앞선 거래(같은 날 거래 제외)가 "
+        st.caption(f"적용 방법: 같은 거래처·계정·방향에서 회계처리일이 이 라인보다 앞선 거래만 기준으로 씁니다. 이 라인과 "
+                   "같은 날의 거래와 뒤의 거래(미래 거래)는 기준에 넣지 않습니다. 앞선 거래가 "
                    f"{settings.r2_min_prior}건 이상일 때만 비교하고, 그 금액들의 중앙값 × {settings.r2_ratio:g}를 초과하면 탐지합니다.")
         if det.r2a.empty:
             st.info("현재 기준으로 R2(a)에 해당하는 라인이 없습니다.")
@@ -543,6 +544,7 @@ with st.container(border=True):
         st.markdown("**조건별 전표 수**")
         st.dataframe(det.r3_counts, hide_index=True, use_container_width=True)
         st.caption(f"적용 기준: 결산일 매년 {settings.closing_month}월 {settings.closing_day}일, 전후 {settings.r3_window}영업일. "
+                   "(a)는 회계처리일 기준, (b)·(c)는 입력일시 기준이며 입력일시가 없는 전표는 (b)·(c)를 검사하지 않습니다. "
                    "(a-2)는 보조 옵션이며 꺼져 있어도 해당 전표 수를 위 표에 보여 줍니다. 한 전표가 여러 조건에 해당할 수 "
                    "있어 조건별 수의 합은 R3 전표 수보다 클 수 있습니다.")
         if det.r3.empty:

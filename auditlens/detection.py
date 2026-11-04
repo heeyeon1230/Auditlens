@@ -57,8 +57,8 @@ RULES = {
         "단위": "전표",
         "목적": "기말·결산 후 분개는 실적을 맞추려는 조정이 들어갈 수 있는 시점이고, 주말 입력은 평소 통제 흐름 밖일 수 있습니다.",
         "조건": "(a) 회계처리일이 결산일 전후 n영업일 이내(기본). (a-2) 매월 말일 전후 n영업일 이내(보조 옵션, 기본 꺼짐, "
-                "결산일과 같은 말일은 (a)로 봄). (b) 회계처리일은 결산일 이전인데 입력일이 결산일 이후(결산 후 입력). "
-                "(c) 입력일이 토·일요일.",
+                "결산일과 같은 말일은 (a)로 봄). (b) 회계처리일은 결산일 이전인데 입력일시(시스템에 실제 입력한 시각)가 결산일 다음 날 "
+                "이후(결산 후 입력). (c) 입력일시가 토·일요일.",
         "한계": "기말에는 감가상각·충당금 같은 정상 결산 분개가 몰립니다. 영업일은 월~금이며 공휴일은 반영하지 않습니다. "
                 "자동 배치 전표는 주말에도 정상적으로 생길 수 있습니다. 입력일시 열이 없으면 (b)·(c)는 검사하지 않습니다.",
     },
@@ -111,12 +111,17 @@ def _lines(df):
 
 
 LINE_COLUMNS = ["전표번호", "회계처리일", "계정코드", "계정과목명", "방향", "금액", "거래처", "파일 행 번호"]
-EXCLUDED_COLUMNS = LINE_COLUMNS + ["제외 사유"]
+EXCLUDED_COLUMNS = LINE_COLUMNS + ["입력일시", "적요", "제외 사유"]
 
 
 def _excluded_lines(lines, reasons):
-    """비교에서 뺀 라인과 사유. reasons는 lines와 같은 순서의 사유 목록입니다."""
-    rows = [{**_line_info(r), "제외 사유": why} for r, why in zip(lines.itertuples(index=False), reasons)]
+    """비교에서 뺀 라인과 사유. reasons는 lines와 같은 순서의 사유 목록입니다.
+
+    금액은 파일 값 그대로이고, 입력일시·적요(열이 있을 때)와 파일 행 번호를 함께 남겨 원래 거래를 찾을 수 있게 합니다.
+    """
+    rows = [{**_line_info(r), "입력일시": getattr(r, "entry_date", pd.NaT),
+             "적요": getattr(r, "description", "") if pd.notna(getattr(r, "description", "")) else "",
+             "제외 사유": why} for r, why in zip(lines.itertuples(index=False), reasons)]
     return pd.DataFrame(rows, columns=EXCLUDED_COLUMNS)
 
 
@@ -215,7 +220,7 @@ def r2_vendor_history(df, settings=None):
                 hits.append({"판정": REVIEW_LABEL, **_line_info(row), "이전 거래 수": n_prior,
                              "이전 거래 기간": period, "이전 거래 중앙값": median, "중앙값 대비 배수": ratio,
                              "탐지 이유": f"{vendor}와의 {code} {row.account_name} {direction} 이전 거래 {n_prior}건"
-                                       f"({period}, 기준 {s.r2_min_prior}건 이상)의 중앙값은 {median:,.0f}원이고 "
+                                       f"(회계처리일 {period}, 이 라인과 같은 날이거나 뒤의 거래는 제외, 기준 {s.r2_min_prior}건 이상)의 중앙값은 {median:,.0f}원이고 "
                                        f"기준은 그 {s.r2_ratio:g}배({s.r2_ratio * median:,.0f}원) 초과인데, 이 라인은 "
                                        f"{row.amount:,.0f}원(중앙값의 {ratio:,.1f}배)입니다."})
     if too_few:
@@ -375,12 +380,12 @@ def r3_timing(df, settings=None):
         entry = v["entry_date"]
         if pd.notna(entry):
             entry_day = entry.date()
-            # (b) 회계처리일은 결산일 이전, 입력일은 결산일 이후
+            # (b) 회계처리일이 속한 회계연도의 결산일보다 '입력일시'의 날짜가 뒤인 경우. 회계처리일은 결산일 찾는 데만 씁니다.
             if entry_day > closing:
                 counts["(b) 결산 후 입력"] += 1
                 conditions.append("(b) 결산 후 입력")
-                reasons.append(f"결산일 {closing:%Y-%m-%d} 이전 회계처리일({posting:%Y-%m-%d})인데 "
-                               f"{entry_day:%Y-%m-%d}에 입력했습니다({(entry_day - closing).days}일 뒤).")
+                reasons.append(f"회계처리일은 {posting:%Y-%m-%d}로 결산일 {closing:%Y-%m-%d} 이전인데, 입력일시는 "
+                               f"{entry:%Y-%m-%d %H:%M}로 결산일 {(entry_day - closing).days}일 뒤입니다(입력일시 기준).")
             # (c) 주말 입력
             if entry.weekday() >= 5:
                 counts["(c) 주말 입력"] += 1

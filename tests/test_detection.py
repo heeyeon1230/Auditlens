@@ -386,3 +386,96 @@ def test_sample_data_answer_key_is_detected():
     assert "(c) 주말 입력" in r3[je("2025-09-12", "831", 6_500_000)]        # A05
     rent = df[df["line_amount"] == 15_000_000]["je_id"]
     assert not set(rent) & (r1 | r2a)                                       # N03 매달 같은 임차료
+
+
+# ---------------------------------------------------------------- 최종 검토 확인 (0원·음수, 미래 거래, 입력일시 기준)
+def test_negative_and_zero_lines_keep_original_data_across_rules():
+    """R1·R2(a)에서 비교하지 않은 음수·0원 라인도 원래 금액과 거래 정보가 남고, R2(b)·R3에서는 그대로 쓰입니다."""
+    entries = vendor_history([1_000_000] * 6)
+    entries.append(("REV", date(2025, 3, 1), [("X100", "출장비", -1_000_000, 0), ("Y900", "현금성자산", 0, -1_000_000)],
+                    {"vendor": "거래처A", "description": "2월 출장비 역분개",
+                     "entry_date": pd.Timestamp(2025, 3, 1, 14, 0)}))  # 토요일 입력
+    entries.append(("ZERO", date(2025, 3, 3), [("X100", "출장비", 0, 0), ("Y900", "현금성자산", 0, 0)],
+                    {"vendor": "거래처A", "description": "금액 미정", "entry_date": pd.Timestamp(2025, 3, 3, 9, 0)}))
+    df = journal(entries)
+    result = run_detection(df)
+
+    for table in (result.r1_excluded, result.r2a_skipped):
+        rev = table[table["전표번호"] == "REV"].set_index("계정코드")
+        assert rev.loc["X100", "금액"] == -1_000_000 and rev.loc["X100", "방향"] == "차변"
+        assert rev.loc["Y900", "금액"] == -1_000_000 and rev.loc["Y900", "방향"] == "대변"
+        assert rev.loc["X100", "회계처리일"] == pd.Timestamp(2025, 3, 1)
+        assert rev.loc["X100", "거래처"] == "거래처A" and rev.loc["X100", "적요"] == "2월 출장비 역분개"
+        assert rev.loc["X100", "입력일시"] == pd.Timestamp(2025, 3, 1, 14, 0)
+        assert rev.loc["X100", "파일 행 번호"] == df[(df["je_id"] == "REV") & (df["account_code"] == "X100")]["file_row"].iloc[0]
+        assert "음수 금액" in rev.loc["X100", "제외 사유"]
+        assert "0원" in table[table["전표번호"] == "ZERO"]["제외 사유"].iloc[0]
+    # 금액 비교 규칙(R1·R2(a))의 탐지 결과에는 들어가지 않음
+    assert "REV" not in set(result.r1["전표번호"]) | set(result.r2a["전표번호"])
+    # 시점 규칙 R3는 금액과 무관하므로 역분개 전표도 검사하고, 전표 금액은 원래 값(음수)으로 표시
+    r3 = result.r3.set_index("전표번호")
+    assert "(c) 주말 입력" in r3.loc["REV", "해당 조건"] and r3.loc["REV", "전표 금액"] == -1_000_000
+    assert "REV" in set(result.summary["전표번호"])
+
+
+def test_r2b_counts_negative_lines_in_monthly_figures():
+    """R2(b) 월 라인 수에는 역분개(음수) 라인도 그대로 들어갑니다."""
+    entries = monthly([10] * 12)
+    entries += [("NEG%d" % i, date(2025, 6, 2 + i % 20), [("X100", "출장비", -100_000, 0), ("Y900", "현금성자산", 0, -100_000)], {})
+                for i in range(30)]
+    table = r2_monthly_pattern(journal(entries))
+    june = table[(table["계정코드"] == "X100") & (table["연월"] == "2025-06") & (table["항목"] == "라인 수")]
+    assert june["이 달 값"].tolist() == [40] and june["구분"].tolist() == ["급증"]
+
+
+def test_r2a_ignores_future_lines_even_if_file_order_is_reversed():
+    """파일에서 뒤 날짜 거래가 먼저 나와도, 기준에는 회계처리일이 앞선 거래만 들어갑니다."""
+    amounts = [1_000_000] * 5 + [6_000_000]
+    entries = vendor_history(amounts)
+    future = [pair(f"F{i}", date(2025, 12, 1) + timedelta(days=i), 50_000_000, vendor="거래처A") for i in range(10)]
+    df = journal(future + entries)  # 미래 거래를 파일 앞쪽에 둠
+    hits = r2_vendor_history(df)[0]
+    v5 = hits[(hits["전표번호"] == "V5") & (hits["방향"] == "차변")].iloc[0]
+    assert v5["이전 거래 수"] == 5 and v5["이전 거래 중앙값"] == 1_000_000
+    assert v5["이전 거래 기간"] == "2025-01-06 ~ 2025-02-03"   # V5(2025-02-10)보다 뒤 날짜는 없음
+    assert "뒤의 거래는 제외" in v5["탐지 이유"]
+    # 미래 거래가 기준에 섞였다면 중앙값이 커져 V5는 탐지되지 않았을 것
+
+
+def test_r2a_same_day_lines_are_excluded_from_each_others_history():
+    """같은 날 거래는 서로의 기준에 들어가지 않고, 다음 날 거래부터 기준에 들어갑니다."""
+    history = vendor_history([1_000_000] * 5)                           # 2025-01-06 ~ 02-03
+    same_day = [pair(f"S{i}", date(2025, 3, 3), 1_000_000, vendor="거래처A") for i in range(20)]
+    big_same_day = [pair("BIG", date(2025, 3, 3), 6_000_000, vendor="거래처A")]
+    next_day = [pair("NEXT", date(2025, 3, 4), 6_000_000, vendor="거래처A")]
+    hits = r2_vendor_history(journal(history + same_day + big_same_day + next_day))[0]
+    debit = hits[hits["방향"] == "차변"].set_index("전표번호")
+    assert debit.loc["BIG", "이전 거래 수"] == 5          # 같은 날 21건은 세지 않음
+    assert debit.loc["NEXT", "이전 거래 수"] == 26        # 3월 3일 21건은 다음 날부터 기준에 들어감
+
+
+def test_r3b_uses_entry_datetime_not_posting_date():
+    """회계처리일이 같아도 입력일시가 결산일 다음 날 이후인 전표만 (b)에 해당합니다."""
+    table, _ = timing([
+        ("SAMEDAY", date(2025, 12, 31), datetime(2025, 12, 31, 23, 59)),   # 결산일 당일 밤 입력: 해당 없음
+        ("NEXTDAY", date(2025, 12, 31), datetime(2026, 1, 1, 0, 1)),       # 결산일 다음 날 입력: 해당
+        ("EARLY", date(2025, 6, 30), datetime(2026, 2, 2, 10, 0)),         # 회계처리일이 오래전이어도 입력 기준
+        ("PREENTRY", date(2025, 12, 31), datetime(2025, 12, 20, 9, 0)),    # 미리 입력: 해당 없음
+    ])
+    by = table.set_index("전표번호")["해당 조건"]
+    assert "(b) 결산 후 입력" in by["NEXTDAY"] and "(b) 결산 후 입력" in by["EARLY"]
+    assert "(b)" not in by.get("SAMEDAY", "") and "(b)" not in by.get("PREENTRY", "")
+    assert "입력일시는 2026-01-01 00:01" in table.set_index("전표번호").loc["NEXTDAY", "탐지 이유"]
+
+
+def test_r3b_not_applied_when_entry_datetime_missing():
+    """입력일시가 없는 전표는 회계처리일이 결산일이어도 (b)·(c)를 적용하지 않습니다."""
+    table, notes, counts = r3_timing(journal([
+        pair("NOENTRY", date(2025, 12, 31), 1_000_000, entry_date=pd.NaT),
+        pair("HASENTRY", date(2025, 12, 31), 1_000_000, entry_date=pd.Timestamp(2026, 1, 20, 10)),
+    ]))
+    by = table.set_index("전표번호")["해당 조건"]
+    assert by["NOENTRY"] == "(a) 결산일 전후"                # (a)만 해당, (b)는 적용 안 함
+    assert "(b) 결산 후 입력" in by["HASENTRY"]
+    assert counts.set_index("조건").loc["(b) 결산 후 입력", "해당 전표 수"] == 1
+    assert any("입력일시가 없는 전표 1개" in n for n in notes)
