@@ -1,8 +1,8 @@
 """AuditLens 화면 (Streamlit).
 
 실행: streamlit run app.py
-현재 버전: 1) 데이터 불러오기  2) 열 연결  3) 데이터 검증  4) 기초 분석  5) 검토 대상 거래(R1~R3)
-탐지 규칙 R4~R6과 결과 다운로드는 다음 개발 단위에서 추가합니다.
+현재 버전: 1) 데이터 불러오기  2) 열 연결  3) 데이터 검증  4) 기초 분석  5) 검토 대상 거래(R1~R6)
+결과 다운로드는 다음 개발 단위에서 추가합니다.
 """
 
 import pandas as pd
@@ -57,8 +57,8 @@ st.info(
 
 with st.sidebar:
     st.header("진행 단계")
-    st.markdown("1. 데이터 불러오기\n2. 열 연결\n3. 데이터 검증\n4. 기초 분석\n5. 검토 대상 거래 (R1~R3)")
-    st.caption("탐지 규칙 R4~R6, 결과 다운로드는 다음 개발 단위에서 추가될 예정입니다.")
+    st.markdown("1. 데이터 불러오기\n2. 열 연결\n3. 데이터 검증\n4. 기초 분석\n5. 검토 대상 거래 (R1~R6)")
+    st.caption("결과 다운로드는 다음 개발 단위에서 추가될 예정입니다.")
 
 # ---------------------------------------------------------------- 1. 데이터 불러오기
 st.header("1. 데이터 불러오기")
@@ -413,8 +413,8 @@ with tab_month:
             st.warning("선택한 구분에 해당하는 계정이 없어 모든 값이 0입니다.")
 
 
-# ---------------------------------------------------------------- 5. 검토 대상 거래 (R1~R3)
-st.header("5. 검토 대상 거래 (R1~R3)")
+# ---------------------------------------------------------------- 5. 검토 대상 거래 (R1~R6)
+st.header("5. 검토 대상 거래 (R1~R6)")
 st.warning(
     f"여기 표시되는 거래는 '{DETECTION_LABEL}'입니다. 정해진 기준에서 벗어나 감사인이 먼저 살펴볼 만한 거래라는 뜻이며, "
     "오류나 부정으로 확정한 것이 아닙니다. 각 거래의 탐지 이유와 판단 근거, 규칙의 한계를 함께 확인해 주세요.  \n"
@@ -441,11 +441,36 @@ with st.expander("탐지 기준 설정 (기본값은 설계서 6절)"):
                                     key="det_r2_high")
     r2_month_low = a3.number_input("R2(b) 하한 배수 (이하이면 급감)", 0.01, 0.9, round(defaults.r2_month_low, 2), 0.01,
                                    key="det_r2_low")
+
+    def file_values(col):
+        """파일에 실제로 있는 값(앞뒤 공백 제거). 선택지는 이 값과 기본값을 합친 목록입니다."""
+        if col not in df:
+            return []
+        return sorted(v for v in df[col].fillna("").astype(str).str.strip().unique() if v)
+
+    st.markdown("**R4~R6**")
+    b1, b2, b3 = st.columns(3)
+    src_opts = sorted(set(file_values("source")) | set(defaults.r4_sources))
+    type_opts = sorted(set(file_values("je_type")) | set(defaults.r4_types))
+    r4_sources = b1.multiselect("R4(a) 수기로 볼 전표 원천 값", src_opts, list(defaults.r4_sources), key="det_r4_src",
+                                help="ERP마다 '수기'를 나타내는 값이 다르므로 파일에 있는 값 중에서 고릅니다.")
+    r4_types = b1.multiselect("R4(a) 조정으로 볼 전표 유형 값", type_opts, list(defaults.r4_types), key="det_r4_type")
+    r4_rare_pct = b2.number_input("R4(c) 입력자 전표 비율 기준 (% 미만)", 0.1, 50.0, defaults.r4_rare_share * 100, 0.5,
+                                  key="det_r4_rare")
+    r4_keywords = b2.text_input("R4(d) 적요 키워드 (쉼표로 구분)", ", ".join(defaults.r4_keywords), key="det_r4_kw")
+    r5_threshold = b3.number_input("R5 기준금액 (원, 입력해야 검사)", min_value=0, value=None, step=1_000_000,
+                                   key="det_r5_threshold", placeholder="예: 50000000",
+                                   help="설계서: 기준금액은 감사인의 중요성 판단에 따라 정합니다. 기본값이 없습니다.")
+    r5_months = b3.number_input("R5 분석 기간 마지막 n개월", 1, 12, defaults.r5_months, key="det_r5_months")
+    r6_days = b3.number_input("R6 회계처리일 차이 (일 이내)", 0, 60, defaults.r6_days, key="det_r6_days")
 settings = DetectionSettings(
     r1_multiplier=float(r1_multiplier), r1_min_lines=int(r1_min_lines), r2_ratio=float(r2_ratio),
     r2_min_prior=int(r2_min_prior), r2_month_high=float(r2_month_high), r2_month_low=float(r2_month_low),
     r3_window=int(r3_window), r3_month_end=bool(r3_month_end), closing_month=int(closing_month),
     closing_day=int(closing_day),
+    r4_sources=tuple(r4_sources), r4_types=tuple(r4_types), r4_rare_share=float(r4_rare_pct) / 100,
+    r4_keywords=tuple(k.strip() for k in r4_keywords.split(",") if k.strip()),
+    r5_threshold=None if r5_threshold is None else float(r5_threshold), r5_months=int(r5_months), r6_days=int(r6_days),
 )
 
 
@@ -480,15 +505,19 @@ def show_table(table, money_cols, date_cols=("회계처리일",), key=None):
 
 # ---- 5-1. 개별 거래 탐지 결과
 with st.container(border=True):
-    st.subheader("5-1. 개별 거래 탐지 결과 (R1 · R2(a) · R3)")
+    st.subheader("5-1. 개별 거래 탐지 결과 (R1 · R2(a) · R3 · R4 · R5 · R6)")
     st.caption("전표나 분개 라인 하나하나에 대한 결과입니다. 판정: " + DETECTION_LABEL)
-    m1, m2, m3, m4 = st.columns(4)
-    m1.metric("검토 대상 전표 (종합)", f"{len(det.summary):,}")
+    m1, m2, m3, m4, m5, m6, m7 = st.columns(7)
+    m1.metric("종합 전표", f"{len(det.summary):,}")
     m2.metric("R1 라인", f"{len(det.r1):,}")
     m3.metric("R2(a) 라인", f"{len(det.r2a):,}")
     m4.metric("R3 전표", f"{len(det.r3):,}")
+    m5.metric("R4 전표", f"{len(det.r4):,}")
+    m6.metric("R5 거래처·조합", f"{len(det.r5):,}")
+    m7.metric("R6 전표 쌍", f"{len(det.r6):,}")
 
-    tab_sum, tab_r1, tab_r2a, tab_r3 = st.tabs(["종합 (전표별)", "R1 금액 분포", "R2(a) 거래처 이전 거래", "R3 시점"])
+    tab_sum, tab_r1, tab_r2a, tab_r3, tab_r4, tab_r5, tab_r6 = st.tabs(
+        ["종합 (전표별)", "R1 금액 분포", "R2(a) 거래처 이전 거래", "R3 시점", "R4 수기·조정", "R5 신규 거래처", "R6 중복 가능"])
 
     with tab_sum:
         st.caption("종합은 규칙별 결과를 전표 단위로 모은 표입니다. 한 전표가 여러 규칙에 해당하면 규칙을 모두 적고, "
@@ -555,6 +584,47 @@ with st.container(border=True):
             table = det.r3 if cond == "전체" else det.r3[det.r3["해당 조건"].str.contains(cond, regex=False)]
             st.caption(f"{len(table):,}개 전표")
             show_table(table, ["전표 금액"], key="det_r3")
+
+    with tab_r4:
+        rule_box("R4")
+        for note in det.r4_notes:
+            st.caption(f"참고: {note}")
+        st.markdown("**조건별 전표 수**")
+        st.dataframe(det.r4_counts, hide_index=True, use_container_width=True)
+        st.caption("한 전표가 여러 조건에 해당할 수 있어 조건별 수의 합은 R4 전표 수보다 클 수 있습니다. 값은 앞뒤 공백만 빼고 "
+                   "파일에 적힌 그대로 비교합니다.")
+        if det.r4.empty:
+            st.info("현재 기준으로 R4에 해당하는 전표가 없습니다.")
+        else:
+            conditions = ["전체"] + sorted({c for v in det.r4["해당 조건"] for c in v.split(", ")})
+            cond = st.radio("조건별 보기", conditions, horizontal=True, key="det_r4_cond")
+            table = det.r4 if cond == "전체" else det.r4[det.r4["해당 조건"].str.contains(cond, regex=False)]
+            st.caption(f"{len(table):,}개 전표")
+            show_table(table, ["전표 금액"], key="det_r4")
+
+    with tab_r5:
+        rule_box("R5")
+        for note in det.r5_notes:
+            st.caption(f"참고: {note}")
+        if settings.r5_threshold is None:
+            st.info("R5는 기준금액을 입력해야 검사합니다. '탐지 기준 설정'에서 기준금액(원)을 입력해 주세요.")
+        elif det.r5.empty:
+            st.info("현재 기준으로 R5에 해당하는 거래처·계정 조합이 없습니다.")
+        else:
+            show_table(det.r5, ["합계 금액", "기준금액"], date_cols=("최초 등장일",), key="det_r5")
+        if len(det.r5_candidates):
+            with st.expander(f"판단 기간에 처음 나타난 거래처·계정 조합 {len(det.r5_candidates):,}개 (기준금액 미만 포함, 참고용)"):
+                show_table(det.r5_candidates, ["합계 금액"], date_cols=("최초 등장일",), key="det_r5_cand")
+
+    with tab_r6:
+        rule_box("R6")
+        for note in det.r6_notes:
+            st.caption(f"참고: {note}")
+        if det.r6.empty:
+            st.info("현재 기준으로 R6에 해당하는 전표 쌍이 없습니다.")
+        else:
+            st.caption("한 쌍에서 일치한 라인을 모두 '일치 라인'에 적었습니다. 두 전표는 종합(전표별)에 모두 R6으로 들어갑니다.")
+            show_table(det.r6, ["일치 금액"], date_cols=("회계처리일 A", "회계처리일 B"), key="det_r6")
 
 # ---- 5-2. 이상 기간 탐지 결과 (R2(b))
 with st.container(border=True):

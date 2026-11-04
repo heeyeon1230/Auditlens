@@ -62,6 +62,38 @@ RULES = {
         "한계": "기말에는 감가상각·충당금 같은 정상 결산 분개가 몰립니다. 영업일은 월~금이며 공휴일은 반영하지 않습니다. "
                 "자동 배치 전표는 주말에도 정상적으로 생길 수 있습니다. 입력일시 열이 없으면 (b)·(c)는 검사하지 않습니다.",
     },
+    "R4": {
+        "이름": "수기·조정 분개와 특정 조건",
+        "단위": "전표",
+        "목적": "자동 전표는 시스템 통제를 거치지만 수기·조정 분개는 사람의 판단이 개입하고, 직무 분리가 안 된 전표는 검토 "
+                "필요성이 높습니다.",
+        "조건": "(a) 전표 원천 또는 전표 유형이 사용자가 고른 값(기본: 원천 '수기', 유형 '조정'·'결산'). (b) 입력자와 승인자가 "
+                "같음. (c) 입력자의 그 회계연도 전표 수가 전체의 기준 비율(기본 1%) 미만. (d) 적요가 비었거나 사용자 지정 "
+                "키워드(기본: 수정, 조정, 오류, 임시)를 포함.",
+        "한계": "'수기'를 나타내는 값은 ERP마다 달라 사용자가 골라야 합니다. 작은 회사는 입력자와 승인자가 같은 것이 일상일 수 "
+                "있습니다. 평소 전표가 적은 정상 사용자(배치 계정, 결산 담당)도 (c)에 걸립니다. 키워드는 표현이 다양해 놓치는 "
+                "것이 많고 정상 적요에도 쓰입니다. 열이 없는 세부 조건은 검사하지 않습니다.",
+    },
+    "R5": {
+        "이름": "신규 거래처·신규 계정 조합",
+        "단위": "거래처 (또는 기존 거래처×계정), 해당 전표",
+        "목적": "기말에 갑자기 나타나 큰 금액을 거래한 거래처는 실재성·특수관계자 여부를 확인할 필요가 있을 수 있습니다.",
+        "조건": "파일 안에서 거래처의 최초 등장일이 분석 기간 마지막 n개월(기본 2개월) 안이고, 그 거래처의 합계 금액이 사용자가 "
+                "입력한 기준금액 이상. 기존 거래처가 처음 쓰는 계정 조합도 같은 방식으로 봅니다. 합계 금액은 전표마다 한 번만 "
+                "셉니다(그 거래처 라인의 차변 합계와 대변 합계 중 큰 값).",
+        "한계": "'신규'는 올린 파일 기준일 뿐이며, 파일 시작 전에 거래한 거래처도 신규로 보일 수 있습니다. 거래처 마스터가 없어 "
+                "표기 차이가 오탐을 만듭니다. 기준금액은 감사인의 중요성 판단에 따라 정해야 하며 기본값이 없습니다. 거래처가 "
+                "빈 라인은 판단하지 않습니다.",
+    },
+    "R6": {
+        "이름": "중복 가능 분개",
+        "단위": "전표 쌍",
+        "목적": "같은 증빙의 이중 입력은 비용·매출 과대계상이나 이중 지급으로 이어질 수 있습니다.",
+        "조건": "서로 다른 전표에 계정·거래처·방향·금액이 같은 라인이 있고 회계처리일 차이가 n일(기본 7일, 달력 기준) 이내. "
+                "적요가 있으면 적요 일치 여부를 함께 표시합니다.",
+        "한계": "같은 금액의 정상 반복 거래(주간 용역비 등)가 걸립니다. 금액을 조금 바꾼 중복이나 다른 거래처명으로 입력한 중복은 "
+                "놓칩니다. 거래처가 빈 라인과 0원 라인은 비교하지 않습니다. 유사 적요 비교는 하지 않습니다.",
+    },
 }
 
 
@@ -77,6 +109,13 @@ class DetectionSettings:
     r3_month_end: bool = False      # (a-2) 매월 말일 전후 보조 옵션 (기본 꺼짐)
     closing_month: int = 12         # 결산일(회계연도 말일)의 월
     closing_day: int = 31           # 결산일의 일
+    r4_sources: tuple = ("수기",)                       # (a) 수기로 볼 전표 원천 값
+    r4_types: tuple = ("조정", "결산")                  # (a) 조정으로 볼 전표 유형 값
+    r4_rare_share: float = 0.01                         # (c) 입력자 전표 비율 기준(미만)
+    r4_keywords: tuple = ("수정", "조정", "오류", "임시")  # (d) 적요 키워드
+    r5_threshold: float = None                          # 기준금액(원). 입력하지 않으면 R5를 검사하지 않음
+    r5_months: int = 2                                  # 분석 기간 마지막 n개월
+    r6_days: int = 7                                    # 회계처리일 차이(일) 이내
 
     def as_table(self):
         labels = {
@@ -85,8 +124,16 @@ class DetectionSettings:
             "r2_month_high": "R2(b) 다른 달 중앙값 대비 상한 배수", "r2_month_low": "R2(b) 다른 달 중앙값 대비 하한 배수",
             "r3_window": "R3(a) 전후 영업일 수", "r3_month_end": "R3(a-2) 매월 말일 보조 옵션",
             "closing_month": "결산월", "closing_day": "결산일",
+            "r4_sources": "R4(a) 수기로 볼 전표 원천", "r4_types": "R4(a) 조정으로 볼 전표 유형",
+            "r4_rare_share": "R4(c) 입력자 전표 비율 기준(미만)", "r4_keywords": "R4(d) 적요 키워드",
+            "r5_threshold": "R5 기준금액(원)", "r5_months": "R5 마지막 n개월", "r6_days": "R6 회계처리일 차이(일) 이내",
         }
-        return pd.DataFrame([{"기준": labels[k], "적용값": v} for k, v in asdict(self).items()])
+
+        def show(v):
+            if isinstance(v, tuple):
+                return ", ".join(v) if v else "(선택 안 함)"
+            return "입력 안 함 (검사하지 않음)" if v is None else v
+        return pd.DataFrame([{"기준": labels[k], "적용값": show(v)} for k, v in asdict(self).items()])
 
 
 def _lines(df):
@@ -406,6 +453,273 @@ def r3_timing(df, settings=None):
     return pd.DataFrame(rows, columns=R3_COLUMNS), notes, count_table
 
 
+
+# ---------------------------------------------------------------- 공통 (R4~R6)
+def _text(series):
+    return series.fillna("").astype(str).str.strip() if series is not None else None
+
+
+def _values_by_voucher(df, col):
+    """전표번호별로 열 값(앞뒤 공백 제거, 빈 값 제외)을 파일 순서대로 중복 없이 모읍니다. {전표번호: [값, ...]}"""
+    if col not in df:
+        return {}
+    work = pd.DataFrame({"je_id": df["je_id"], "v": _text(df[col])})
+    work = work[work["v"] != ""].drop_duplicates()
+    return work.groupby("je_id", sort=False)["v"].agg(list).to_dict()
+
+
+def _voucher_frame(df):
+    """전표 단위 기본 정보: 회계처리일(가장 이른 날), 전표 금액(차변 합계), 포함 계정, 파일 행 번호."""
+    lines = df.sort_values("file_row") if "file_row" in df else df
+    base = lines.groupby("je_id", sort=False).agg(date=("posting_date", "min"), amount=("debit", "sum"))
+    labels = (lines["account_code"].astype(str) + " " + lines["account_name"].astype(str)).str.strip()
+    accounts = pd.DataFrame({"je_id": lines["je_id"], "a": labels}).drop_duplicates() \
+        .groupby("je_id", sort=False)["a"].agg(", ".join)
+    rows = lines["file_row"].astype(str).groupby(lines["je_id"], sort=False).agg(", ".join) if "file_row" in lines \
+        else pd.Series("", index=base.index)
+    return {je: {"회계처리일": r.date, "전표 금액": float(r.amount), "포함 계정": accounts.get(je, ""),
+                 "파일 행 번호": rows.get(je, "")} for je, r in base.iterrows()}
+
+
+# ---------------------------------------------------------------- R4
+R4_COLUMNS = ["판정", "전표번호", "회계처리일", "해당 조건", "전표 원천", "전표 유형", "입력자", "승인자", "적요",
+              "포함 계정", "전표 금액", "파일 행 번호", "탐지 이유"]
+
+
+def _fiscal_year_end(posting, s):
+    return _closing_for(posting.date(), s)
+
+
+def r4_manual_entries(df, settings=None):
+    """R4. 전표 단위로 (a) 수기·조정 값, (b) 입력자=승인자, (c) 드문 입력자, (d) 적요 없음·키워드를 봅니다.
+
+    반환값: (탐지 표, 처리 내역 목록, 조건별 전표 수 표). 열이 없는 세부 조건은 검사하지 않고 그 사실을 적습니다.
+    값은 앞뒤 공백만 빼고 그대로 비교합니다(대소문자·표기를 바꾸지 않음).
+    """
+    s = settings or DetectionSettings()
+    notes = []
+    count_cols = ["조건", "해당 전표 수", "적용 여부"]
+    if len(df) == 0:
+        return pd.DataFrame(columns=R4_COLUMNS), notes, pd.DataFrame(columns=count_cols)
+    has = {c: c in df and _text(df[c]).ne("").any() for c in ["source", "je_type", "created_by", "approved_by", "description"]}
+    applied = {
+        "(a) 수기·조정 전표": "적용" if (has["source"] or has["je_type"]) and (s.r4_sources or s.r4_types)
+        else ("검사 안 함 (전표 원천·유형 열 없음)" if not (has["source"] or has["je_type"]) else "검사 안 함 (선택한 값 없음)"),
+        "(b) 입력자 = 승인자": "적용" if has["created_by"] and has["approved_by"] else "검사 안 함 (입력자 또는 승인자 열 없음)",
+        "(c) 드문 입력자": "적용" if has["created_by"] else "검사 안 함 (입력자 열 없음)",
+        "(d) 적요 없음·키워드": "적용" if "description" in df else "검사 안 함 (적요 열 없음)",
+    }
+    for cond, state in applied.items():
+        if state != "적용":
+            notes.append(f"{cond}: {state}")
+
+    info = _voucher_frame(df)
+    values = {c: _values_by_voucher(df, c) for c in ["source", "je_type", "created_by", "approved_by", "description"]}
+    # (c) 회계연도별 입력자 전표 수 (입력자가 빈 전표는 세지 않음). 한 전표에 입력자가 여럿이면 첫 값을 씁니다.
+    creators = {}
+    if has["created_by"]:
+        for je, v in info.items():
+            users = values["created_by"].get(je, [])
+            creators[je] = (users[0] if users else "", _fiscal_year_end(v["회계처리일"], s))
+        by_fy = pd.DataFrame([(u, fy) for u, fy in creators.values() if u], columns=["user", "fy"])
+        fy_total = by_fy.groupby("fy").size().to_dict()
+        user_count = by_fy.groupby(["fy", "user"]).size().to_dict()
+
+    counts = {k: 0 for k in applied}
+    skipped_b = 0
+    rows = []
+    for je in info:
+        conditions, reasons = [], []
+        sources, types = values["source"].get(je, []), values["je_type"].get(je, [])
+        makers, approvers = values["created_by"].get(je, []), values["approved_by"].get(je, [])
+        descs = values["description"].get(je, [])
+
+        if applied["(a) 수기·조정 전표"] == "적용":
+            hit_src = [v for v in sources if v in s.r4_sources]
+            hit_type = [v for v in types if v in s.r4_types]
+            if hit_src or hit_type:
+                counts["(a) 수기·조정 전표"] += 1
+                conditions.append("(a) 수기·조정 전표")
+                what = ([f"전표 원천 '{v}'" for v in hit_src] + [f"전표 유형 '{v}'" for v in hit_type])
+                reasons.append(f"{', '.join(what)}에 해당합니다(선택한 값: 원천 {list(s.r4_sources)}, 유형 {list(s.r4_types)}).")
+        if applied["(b) 입력자 = 승인자"] == "적용":
+            if not makers or not approvers:
+                skipped_b += 1
+            elif set(makers) & set(approvers):
+                same = sorted(set(makers) & set(approvers))[0]
+                counts["(b) 입력자 = 승인자"] += 1
+                conditions.append("(b) 입력자 = 승인자")
+                reasons.append(f"입력자와 승인자가 모두 '{same}'입니다.")
+        if applied["(c) 드문 입력자"] == "적용" and creators.get(je, ("", None))[0]:
+            user, fy = creators[je]
+            n, total = user_count[(fy, user)], fy_total[fy]
+            if n / total < s.r4_rare_share:
+                counts["(c) 드문 입력자"] += 1
+                conditions.append("(c) 드문 입력자")
+                reasons.append(f"입력자 '{user}'의 {fy:%Y-%m-%d} 결산 회계연도 전표는 {n:,}개로 그해 전체 {total:,}개의 "
+                               f"{n / total:.2%}입니다(기준 {s.r4_rare_share:.0%} 미만).")
+        if applied["(d) 적요 없음·키워드"] == "적용":
+            if not descs:
+                counts["(d) 적요 없음·키워드"] += 1
+                conditions.append("(d) 적요 없음")
+                reasons.append("모든 라인의 적요가 비어 있습니다.")
+            else:
+                found = [k for k in s.r4_keywords if k and any(k in d for d in descs)]
+                if found:
+                    counts["(d) 적요 없음·키워드"] += 1
+                    conditions.append("(d) 적요 키워드")
+                    reasons.append(f"적요에 키워드 {', '.join(repr(k) for k in found)}가 들어 있습니다.")
+        if conditions:
+            v = info[je]
+            rows.append({"판정": REVIEW_LABEL, "전표번호": je, "회계처리일": v["회계처리일"],
+                         "해당 조건": ", ".join(conditions), "전표 원천": ", ".join(sources), "전표 유형": ", ".join(types),
+                         "입력자": ", ".join(makers), "승인자": ", ".join(approvers), "적요": " / ".join(descs),
+                         "포함 계정": v["포함 계정"], "전표 금액": v["전표 금액"], "파일 행 번호": v["파일 행 번호"],
+                         "탐지 이유": " ".join(reasons)})
+    if skipped_b:
+        notes.append(f"입력자나 승인자가 비어 있는 전표 {skipped_b:,}개는 (b)를 검사하지 않았습니다.")
+    count_table = pd.DataFrame([{"조건": k, "해당 전표 수": counts[k], "적용 여부": applied[k]} for k in applied],
+                               columns=count_cols)
+    return pd.DataFrame(rows, columns=R4_COLUMNS), notes, count_table
+
+
+# ---------------------------------------------------------------- R5
+R5_COLUMNS = ["판정", "구분", "거래처", "계정", "최초 등장일", "판단 기간", "전표 수", "라인 수", "합계 금액", "기준금액",
+              "전표번호", "탐지 이유"]
+R5_CANDIDATE_COLUMNS = ["구분", "거래처", "계정", "최초 등장일", "전표 수", "합계 금액", "기준금액 이상"]
+
+
+def _voucher_amount_sum(part):
+    """전표마다 한 번만 세는 합계: 전표별로 (차변 합계, 대변 합계) 중 큰 값을 더합니다."""
+    per = part.groupby("je_id").agg(dr=("debit", "sum"), cr=("credit", "sum"))
+    return float(np.maximum(per["dr"], per["cr"]).sum())
+
+
+def r5_new_vendors(df, settings=None):
+    """R5. 분석 기간 마지막 n개월에 처음 나타난 거래처, 기존 거래처의 처음 쓰는 계정 조합.
+
+    반환값: (탐지 표, 처리 내역 목록, 신규 후보 전체 표). 기준금액이 없으면 탐지 표는 비고 후보 표만 돌려줍니다.
+    """
+    s = settings or DetectionSettings()
+    notes = []
+    empty = (pd.DataFrame(columns=R5_COLUMNS), notes, pd.DataFrame(columns=R5_CANDIDATE_COLUMNS))
+    if len(df) == 0:
+        return empty
+    if "vendor" not in df or _text(df["vendor"]).eq("").all():
+        notes.append("거래처 열이 없거나 모두 비어 있어 R5를 검사하지 않았습니다.")
+        return empty
+    lines = df.copy()
+    lines["vendor"] = _text(lines["vendor"])
+    blank = lines["vendor"] == ""
+    if blank.any():
+        notes.append(f"거래처가 비어 있는 라인 {int(blank.sum()):,}건은 R5에서 판단하지 않았습니다.")
+    lines = lines[~blank]
+    last = lines["posting_date"].max().to_period("M")
+    start = (last - (s.r5_months - 1)).start_time
+    end = lines["posting_date"].max()
+    period = f"{start:%Y-%m-%d} ~ {end:%Y-%m-%d} (파일의 마지막 {s.r5_months}개월)"
+    if s.r5_threshold is None:
+        notes.append("R5 기준금액을 입력하지 않아 탐지하지 않았습니다. 아래 신규 후보 목록은 참고용입니다.")
+
+    first_vendor = lines.groupby("vendor")["posting_date"].min()
+    candidates, rows = [], []
+
+    def add(kind, vendor, account, part, first):
+        total = _voucher_amount_sum(part) if account == "" else float(part["line_amount"].sum())
+        ok = s.r5_threshold is not None and total >= s.r5_threshold
+        candidates.append({"구분": kind, "거래처": vendor, "계정": account, "최초 등장일": first,
+                           "전표 수": part["je_id"].nunique(), "합계 금액": total,
+                           "기준금액 이상": "예" if ok else ("기준금액 미입력" if s.r5_threshold is None else "아니오")})
+        if ok:
+            target = f"{vendor}" + (f"·{account}" if account else "")
+            rows.append({"판정": REVIEW_LABEL, "구분": kind, "거래처": vendor, "계정": account, "최초 등장일": first,
+                         "판단 기간": period, "전표 수": part["je_id"].nunique(), "라인 수": len(part),
+                         "합계 금액": total, "기준금액": s.r5_threshold,
+                         "전표번호": ", ".join(dict.fromkeys(part.sort_values("posting_date")["je_id"])),
+                         "탐지 이유": f"{target}의 파일 내 최초 등장일 {first:%Y-%m-%d}가 판단 기간({period}) 안이고, "
+                                   f"합계 금액 {total:,.0f}원이 기준금액 {s.r5_threshold:,.0f}원 이상입니다"
+                                   f"(전표 {part['je_id'].nunique()}개{', 전표마다 한 번만 셈' if not account else ''})."})
+
+    for vendor, first in first_vendor.items():
+        if first >= start:
+            add("신규 거래처", vendor, "", lines[lines["vendor"] == vendor], first)
+    old = lines[lines["vendor"].map(first_vendor) < start]
+    first_combo = old.groupby(["vendor", "account_code"])["posting_date"].min()
+    for (vendor, code), first in first_combo.items():
+        if first >= start:
+            part = old[(old["vendor"] == vendor) & (old["account_code"] == code)]
+            name = part["account_name"].mode().iloc[0]
+            add("기존 거래처의 신규 계정", vendor, f"{code} {name}", part, first)
+    return pd.DataFrame(rows, columns=R5_COLUMNS), notes, pd.DataFrame(candidates, columns=R5_CANDIDATE_COLUMNS)
+
+
+# ---------------------------------------------------------------- R6
+R6_COLUMNS = ["판정", "전표번호 A", "전표번호 B", "회계처리일 A", "회계처리일 B", "일수 차이", "거래처", "일치 라인",
+              "일치 금액", "적요 일치", "파일 행 번호 A", "파일 행 번호 B", "탐지 이유"]
+
+
+def r6_duplicates(df, settings=None):
+    """R6. 서로 다른 전표의 같은 계정·거래처·방향·금액 라인이 n일 이내에 있으면 전표 쌍으로 묶어 보여 줍니다.
+
+    반환값: (탐지 표, 처리 내역 목록). 같은 전표 안의 라인끼리는 비교하지 않습니다.
+    """
+    s = settings or DetectionSettings()
+    notes = []
+    if len(df) == 0:
+        return pd.DataFrame(columns=R6_COLUMNS), notes
+    if "vendor" not in df or _text(df["vendor"]).eq("").all():
+        notes.append("거래처 열이 없거나 모두 비어 있어 R6을 검사하지 않았습니다(설계서 조건: 같은 거래처).")
+        return pd.DataFrame(columns=R6_COLUMNS), notes
+    lines = _lines(df)
+    lines["description"] = _text(lines["description"]) if "description" in lines else ""
+    blank = lines["vendor"] == ""
+    zero = (lines["amount"] == 0) & ~blank
+    both = (lines["direction"] == "차변·대변") & ~blank & ~zero
+    for mask, text in [(blank, "거래처가 비어 있어"), (zero, "0원이라"), (both, "한 행에 차변·대변이 모두 있어")]:
+        if mask.any():
+            notes.append(f"{text} 비교하지 않은 라인 {int(mask.sum()):,}건이 있습니다.")
+    lines = lines[~blank & ~zero & ~both]
+    keys = ["account_code", "vendor", "direction", "amount"]
+    lines = lines[lines.duplicated(keys, keep=False)]  # 같은 계정·거래처·방향·금액이 2번 이상 나오는 라인만 비교
+
+    pairs = {}
+    for (code, vendor, direction, amount), part in lines.groupby(["account_code", "vendor", "direction", "amount"]):
+        if part["je_id"].nunique() < 2:
+            continue
+        recs = part.sort_values(["posting_date", "file_row"]).to_dict("records")
+        for i, a in enumerate(recs):
+            for b in recs[i + 1:]:
+                days = (b["posting_date"] - a["posting_date"]).days
+                if days > s.r6_days:
+                    break
+                if a["je_id"] == b["je_id"]:
+                    continue
+                x, y = (a, b) if a["je_id"] < b["je_id"] else (b, a)
+                key = (x["je_id"], y["je_id"])
+                item = pairs.setdefault(key, {"lines": [], "a": x, "b": y, "days": abs(days)})
+                item["lines"].append((x, y))
+    rows = []
+    for (ja, jb), item in sorted(pairs.items()):
+        matched = item["lines"]
+        desc_a = [x["description"] for x, _ in matched]
+        desc_b = [y["description"] for _, y in matched]
+        if not any(desc_a) and not any(desc_b):
+            same_desc = "적요 없음"
+        else:
+            same_desc = "일치" if all(p == q and p for p, q in zip(desc_a, desc_b)) else "다름"
+        text = "; ".join(f"{x['account_code']} {x['account_name']} {x['direction']} {x['amount']:,.0f}원" for x, _ in matched)
+        days = max(abs((y["posting_date"] - x["posting_date"]).days) for x, y in matched)
+        rows.append({"판정": REVIEW_LABEL, "전표번호 A": ja, "전표번호 B": jb,
+                     "회계처리일 A": item["a"]["posting_date"], "회계처리일 B": item["b"]["posting_date"],
+                     "일수 차이": days, "거래처": item["a"]["vendor"], "일치 라인": text,
+                     "일치 금액": max(x["amount"] for x, _ in matched), "적요 일치": same_desc,
+                     "파일 행 번호 A": ", ".join(str(x["file_row"]) for x, _ in matched),
+                     "파일 행 번호 B": ", ".join(str(y["file_row"]) for _, y in matched),
+                     "탐지 이유": f"전표 {ja}와 {jb}에 거래처 {item['a']['vendor']}의 같은 계정·방향·금액 라인이 있습니다"
+                               f"({text}). 회계처리일 차이 {days}일(기준 {s.r6_days}일 이내), 적요 {same_desc}."})
+    return pd.DataFrame(rows, columns=R6_COLUMNS), notes
+
+
 # ---------------------------------------------------------------- 종합
 SUMMARY_COLUMNS = ["전표번호", "판정", "해당 규칙 수", "해당 규칙", "회계처리일", "포함 계정", "전표 금액", "탐지 이유"]
 REASON_COLUMNS = ["전표번호", "규칙", "대상", "탐지 이유"]
@@ -426,13 +740,22 @@ class DetectionResult:
     r3_counts: pd.DataFrame
     summary: pd.DataFrame
     reasons: pd.DataFrame  # 전표별 탐지 사유를 규칙·라인마다 한 행씩 (종합 화면의 상세용)
+    r4: pd.DataFrame = None
+    r4_notes: list = None
+    r4_counts: pd.DataFrame = None
+    r5: pd.DataFrame = None
+    r5_notes: list = None
+    r5_candidates: pd.DataFrame = None
+    r6: pd.DataFrame = None
+    r6_notes: list = None
 
 
-def summarize(df, r1, r2a, r3):
+def summarize(df, r1, r2a, r3, extra=()):
     """전표 단위 종합표와 사유 표. 해당 규칙 수가 많은 순서로 정렬합니다.
 
     R2(b)는 계정-월(기간) 단위 판단이라 전표 종합표에 넣지 않습니다. 전표 금액은 그 전표의 차변 합계(원)입니다.
     반환값: (종합표, 사유 표). 사유 표에는 한 전표가 여러 규칙·여러 라인에서 탐지된 사유가 모두 한 행씩 들어갑니다.
+    extra: R4~R6처럼 표 모양이 다른 규칙의 사유 목록. {"전표번호", "회계처리일", "규칙", "대상", "탐지 이유"} 사전들.
     """
     found, reason_rows = {}, []
     for rule, table in [("R1", r1), ("R2(a)", r2a), ("R3", r3)]:
@@ -444,6 +767,12 @@ def summarize(df, r1, r2a, r3):
             target = (f"라인 {row['파일 행 번호']}행 · {row['계정코드']} {row['계정과목명']} {row['방향']}"
                       if rule != "R3" else f"전표 · {row['해당 조건']}")
             reason_rows.append({"전표번호": row["전표번호"], "규칙": rule, "대상": target, "탐지 이유": row["탐지 이유"]})
+    for e in extra:
+        item = found.setdefault(e["전표번호"], {"rules": [], "reasons": [], "date": e["회계처리일"]})
+        if e["규칙"] not in item["rules"]:
+            item["rules"].append(e["규칙"])
+        item["reasons"].append(f"[{e['규칙']}] {e['탐지 이유']}")
+        reason_rows.append({k: e[k] for k in REASON_COLUMNS})
     part = df[df["je_id"].isin(found)] if found else df.iloc[0:0]
     totals = part.groupby("je_id")["debit"].sum().to_dict()
     accounts = {je: ", ".join(dict.fromkeys(f"{c} {n}".strip() for c, n in zip(g["account_code"], g["account_name"])))
@@ -464,6 +793,28 @@ def run_detection(df, settings=None):
     r2a, r2a_status, r2a_skipped = r2_vendor_history(df, s)
     r2b = r2_monthly_pattern(df, s)
     r3, r3_notes, r3_counts = r3_timing(df, s)
-    summary, reasons = summarize(df, r1, r2a, r3)
+    r4, r4_notes, r4_counts = r4_manual_entries(df, s)
+    r5, r5_notes, r5_candidates = r5_new_vendors(df, s)
+    r6, r6_notes = r6_duplicates(df, s)
+    summary, reasons = summarize(df, r1, r2a, r3, _extra_reasons(df, r4, r5, r6))
     return DetectionResult(s, r1, r1_skipped, r1_excluded, r2a, r2a_status, r2a_skipped, r2b, r3, r3_notes,
-                           r3_counts, summary, reasons)
+                           r3_counts, summary, reasons, r4, r4_notes, r4_counts, r5, r5_notes, r5_candidates, r6, r6_notes)
+
+
+def _extra_reasons(df, r4, r5, r6):
+    """R4~R6 결과를 전표별 사유 목록으로 바꿉니다(종합표용)."""
+    dates = df.groupby("je_id")["posting_date"].min().to_dict() if len(df) else {}
+    out = []
+    for row in r4.to_dict("records"):
+        out.append({"전표번호": row["전표번호"], "회계처리일": row["회계처리일"], "규칙": "R4",
+                    "대상": f"전표 · {row['해당 조건']}", "탐지 이유": row["탐지 이유"]})
+    for row in r5.to_dict("records"):
+        target = f"{row['구분']} · {row['거래처']}" + (f" · {row['계정']}" if row["계정"] else "")
+        for je in row["전표번호"].split(", "):
+            out.append({"전표번호": je, "회계처리일": dates.get(je), "규칙": "R5", "대상": target,
+                        "탐지 이유": row["탐지 이유"]})
+    for row in r6.to_dict("records"):
+        for me, other in [("전표번호 A", "전표번호 B"), ("전표번호 B", "전표번호 A")]:
+            out.append({"전표번호": row[me], "회계처리일": dates.get(row[me]), "규칙": "R6",
+                        "대상": f"짝 전표 {row[other]} · {row['일치 라인']}", "탐지 이유": row["탐지 이유"]})
+    return out
