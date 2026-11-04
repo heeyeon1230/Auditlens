@@ -106,12 +106,13 @@ def test_불균형과_검증_불가_전표를_나눠_표시():
 def test_검토_대상_거래_화면이_표시됨():
     at = AppTest.from_file(APP, default_timeout=180).run()
     assert not at.exception
-    assert any(h.value == "5. 검토 대상 거래 (R1~R3)" for h in at.header)
-    assert [t.label for t in at.tabs][3:] == ["종합 (전표별)", "R1 금액 분포", "R2(a) 거래처 이전 거래", "R3 시점"]
+    assert any(h.value == "5. 검토 대상 거래 (R1~R6)" for h in at.header)
+    assert [t.label for t in at.tabs][3:] == ["종합 (전표별)", "R1 금액 분포", "R2(a) 거래처 이전 거래", "R3 시점",
+                                        "R4 수기·조정", "R5 신규 거래처", "R6 중복 가능"]
     notice = " ".join(w.value for w in at.warning)
     assert "오류나 부정으로 확정한 것이 아닙니다" in notice and "탐지되지 않은 거래가 정상 거래라는 뜻도 아닙니다" in notice
     subheaders = [h.value for h in at.subheader]
-    assert "5-1. 개별 거래 탐지 결과 (R1 · R2(a) · R3)" in subheaders
+    assert "5-1. 개별 거래 탐지 결과 (R1 · R2(a) · R3 · R4 · R5 · R6)" in subheaders
     assert "5-2. 이상 기간 탐지 결과 (R2(b) · 계정-월)" in subheaders
     assert any("개별 거래가 아니라 계정과 월의 조합" in i.value for i in at.info)
     metrics = {m.label: m.value for m in at.metric}
@@ -122,6 +123,16 @@ def test_검토_대상_거래_화면이_표시됨():
     summary = at.dataframe[[i for i, d in enumerate(at.dataframe) if "해당 규칙 수" in d.value.columns][0]].value
     assert (summary["판정"] == "검토 대상 거래").all()
     assert summary["해당 규칙 수"].is_monotonic_decreasing
+    assert (summary["검토 구분"] == "우선 검토").all()  # 첫 종합표는 우선 검토 목록
+    assert any(e.label.startswith("보조 목록: 수기·조정 여부(R4(a))만 해당하는 전표") for e in at.expander)
+    assert int(metrics["우선 검토 전표"].replace(",", "")) == len(summary)
+    support = [d.value for d in at.dataframe if "검토 구분" in d.value.columns
+               and (d.value["검토 구분"] == "보조 (수기·조정 여부만 해당)").all() and len(d.value)][0]
+    assert (support["판정"] == "수기·조정 전표(보조 정보)").all()
+    at.selectbox(key="det_r2b_pick").set_value("824 운반비 · 2025-06").run()
+    assert not at.exception
+    period = [d.value for d in at.dataframe if "종합 검토 구분" in d.value.columns][0]
+    assert len(period) >= 36 and set(period["종합 검토 구분"]) <= {"우선 검토", "보조 (수기·조정 여부만 해당)", "해당 없음"}
 
 
 def test_탐지_기준을_바꾸면_다시_계산됨():
@@ -153,3 +164,15 @@ def test_선택_열이_없는_다른_업종_파일도_탐지_화면이_표시됨
     assert "입력일시 열이 없거나" in captions
     status = [d.value for d in at.dataframe if "구분" in d.value.columns and "설명" in d.value.columns][0]
     assert "거래처 열 자체가 없음" in status.set_index("구분").loc["거래처 없음", "설명"]
+
+
+def test_R4_R6_탭과_R5_기준금액_입력():
+    at = AppTest.from_file(APP, default_timeout=180).run()
+    assert not at.exception
+    metrics = {m.label: m.value for m in at.metric}
+    assert int(metrics["R4 전표"].replace(",", "")) > 0 and metrics["R6 전표 쌍"] == "1"
+    assert metrics["R5 거래처·조합"] == "0"  # 기준금액을 넣기 전에는 R5를 검사하지 않음
+    assert any("기준금액을 입력해야 검사합니다" in i.value for i in at.info)
+    at.number_input(key="det_r5_threshold").set_value(50_000_000).run()
+    assert not at.exception
+    assert {m.label: m.value for m in at.metric}["R5 거래처·조합"] == "1"
