@@ -176,3 +176,50 @@ def test_R4_R6_탭과_R5_기준금액_입력():
     at.number_input(key="det_r5_threshold").set_value(50_000_000).run()
     assert not at.exception
     assert {m.label: m.value for m in at.metric}["R5 거래처·조합"] == "1"
+
+
+def test_탐지_기준_설정이_사이드바에_있고_기본값이면_변경_0개():
+    at = AppTest.from_file(APP, default_timeout=180).run()
+    assert not at.exception
+    assert any(h.value == "탐지 기준 설정" for h in at.sidebar.header)
+    labels = [e.label for e in at.sidebar.expander]
+    assert labels == ["공통: 결산일", "R1 금액 분포", "R2(a) 거래처 이전 거래", "R2(b) 계정-월 이상 기간", "R3 시점",
+                      "R4 수기·조정", "R5 신규 거래처", "R6 중복 가능"]
+    assert [t.label for t in at.sidebar.toggle] == ["R1 사용", "R2(a) 사용", "R2(b) 사용", "R3 사용", "R4 사용", "R5 사용",
+                                                    "R6 사용"]
+    assert all(t.value for t in at.sidebar.toggle)
+    metrics = {m.label: m.value for m in at.metric}
+    assert metrics["기본값과 다른 항목"] == "0개"
+    assert metrics["우선 검토 전표"] == "137"  # 기본값 결과는 이전과 같음
+    table = [d.value for d in at.dataframe if "기본값과 다름" in d.value.columns][0]
+    assert (table["기본값과 다름"] == "").all()
+
+
+def test_규칙을_끄면_꺼짐_표시되고_되돌리기로_복원():
+    at = AppTest.from_file(APP, default_timeout=180).run()
+    before = {m.label: m.value for m in at.metric}
+    at.toggle(key="det_on_r3_enabled").set_value(False).run()
+    assert not at.exception
+    metrics = {m.label: m.value for m in at.metric}
+    assert metrics["R3 전표"] == "꺼짐" and metrics["기본값과 다른 항목"] == "1개"
+    assert metrics["R1 라인"] == before["R1 라인"] and metrics["R4 전표"] == before["R4 전표"]  # 다른 규칙은 그대로
+    assert any("R3 규칙이 꺼져 있습니다" in w.value for w in at.warning)
+    assert any("꺼진 규칙: R3" in w.value for w in at.sidebar.warning)
+    assert "R3 시점" in [t.label for t in at.tabs]  # 탭은 그대로 둠
+    table = [d.value for d in at.dataframe if "기본값과 다름" in d.value.columns][0].set_index("기준")
+    assert table.loc["R3 사용", "적용값"] == "꺼짐" and table.loc["R3 사용", "기본값과 다름"] == "예"
+
+    at.number_input(key="det_r6_days").set_value(10).run()
+    assert {m.label: m.value for m in at.metric}["기본값과 다른 항목"] == "2개"
+    at.button(key="det_reset").click().run()
+    assert not at.exception
+    assert at.toggle(key="det_on_r3_enabled").value is True and at.number_input(key="det_r6_days").value == 7
+    assert {m.label: m.value for m in at.metric} == before  # 기본값 결과로 복원
+
+
+def test_R2b를_끄면_5_2에_꺼짐_표시():
+    at = AppTest.from_file(APP, default_timeout=180).run()
+    at.toggle(key="det_on_r2b_enabled").set_value(False).run()
+    assert not at.exception
+    assert {m.label: m.value for m in at.metric}["검토 대상 기간 (계정-월)"] == "꺼짐"
+    assert any("R2(b) 규칙이 꺼져 있습니다" in w.value for w in at.warning)

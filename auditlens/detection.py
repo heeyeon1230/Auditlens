@@ -116,6 +116,14 @@ class DetectionSettings:
     r5_threshold: float = None                          # 기준금액(원). 입력하지 않으면 R5를 검사하지 않음
     r5_months: int = 2                                  # 분석 기간 마지막 n개월
     r6_days: int = 7                                    # 회계처리일 차이(일) 이내
+    # 규칙별 켜기/끄기 (기본은 모두 켜짐). 꺼진 규칙은 계산하지 않고 종합에도 넣지 않습니다.
+    r1_enabled: bool = True
+    r2a_enabled: bool = True
+    r2b_enabled: bool = True
+    r3_enabled: bool = True
+    r4_enabled: bool = True
+    r5_enabled: bool = True
+    r6_enabled: bool = True
 
     def as_table(self):
         labels = {
@@ -127,13 +135,33 @@ class DetectionSettings:
             "r4_sources": "R4(a) 수기로 볼 전표 원천", "r4_types": "R4(a) 조정으로 볼 전표 유형",
             "r4_rare_share": "R4(c) 입력자 전표 비율 기준(미만)", "r4_keywords": "R4(d) 적요 키워드",
             "r5_threshold": "R5 기준금액(원)", "r5_months": "R5 마지막 n개월", "r6_days": "R6 회계처리일 차이(일) 이내",
+            **{field: f"{rule} 사용" for rule, field in RULE_SWITCHES.items()},
         }
 
         def show(v):
+            if isinstance(v, bool):
+                return "켜짐" if v else "꺼짐"
             if isinstance(v, tuple):
                 return ", ".join(v) if v else "(선택 안 함)"
             return "입력 안 함 (검사하지 않음)" if v is None else v
-        return pd.DataFrame([{"기준": labels[k], "적용값": show(v)} for k, v in asdict(self).items()])
+        base = asdict(DetectionSettings())
+        return pd.DataFrame([{"기준": labels[k], "기본값": show(base[k]), "적용값": show(v),
+                              "기본값과 다름": "예" if v != base[k] else ""} for k, v in asdict(self).items()])
+
+    def changed(self):
+        """기본값과 다른 설정 항목 이름(필드 이름) 목록."""
+        base = asdict(DetectionSettings())
+        return [k for k, v in asdict(self).items() if v != base[k]]
+
+    def disabled_rules(self):
+        """꺼진 규칙 코드 목록 (예: ["R1", "R6"])."""
+        return [rule for rule, field in RULE_SWITCHES.items() if not getattr(self, field)]
+
+
+# 규칙 코드 → 켜기/끄기 설정 이름
+RULE_SWITCHES = {"R1": "r1_enabled", "R2(a)": "r2a_enabled", "R2(b)": "r2b_enabled", "R3": "r3_enabled",
+                 "R4": "r4_enabled", "R5": "r5_enabled", "R6": "r6_enabled"}
+OFF_NOTE = "사용자가 이 규칙을 껐습니다. 계산하지 않았고 종합(전표별)에도 넣지 않았습니다."
 
 
 def _lines(df):
@@ -823,13 +851,22 @@ def summarize(df, r1, r2a, r3, extra=()):
 
 def run_detection(df, settings=None):
     s = settings or DetectionSettings()
-    r1, r1_skipped, r1_excluded = r1_amount_outliers(df, s)
-    r2a, r2a_status, r2a_skipped = r2_vendor_history(df, s)
-    r2b = r2_monthly_pattern(df, s)
-    r3, r3_notes, r3_counts = r3_timing(df, s)
-    r4, r4_notes, r4_counts = r4_manual_entries(df, s)
-    r5, r5_notes, r5_candidates = r5_new_vendors(df, s)
-    r6, r6_notes = r6_duplicates(df, s)
+    off = set(s.disabled_rules())
+
+    def data(rule):
+        # 꺼진 규칙은 빈 표로 계산해 결과 구조(열)는 그대로 두고 탐지 결과만 비웁니다.
+        return df.iloc[0:0] if rule in off else df
+
+    r1, r1_skipped, r1_excluded = r1_amount_outliers(data("R1"), s)
+    r2a, r2a_status, r2a_skipped = r2_vendor_history(data("R2(a)"), s)
+    r2b = r2_monthly_pattern(data("R2(b)"), s)
+    r3, r3_notes, r3_counts = r3_timing(data("R3"), s)
+    r4, r4_notes, r4_counts = r4_manual_entries(data("R4"), s)
+    r5, r5_notes, r5_candidates = r5_new_vendors(data("R5"), s)
+    r6, r6_notes = r6_duplicates(data("R6"), s)
+    for rule, notes in [("R3", r3_notes), ("R4", r4_notes), ("R5", r5_notes), ("R6", r6_notes)]:
+        if rule in off:
+            notes[:] = [OFF_NOTE]
     summary, reasons = summarize(df, r1, r2a, r3, _extra_reasons(df, r4, r5, r6))
     # R4 표에서도 종합의 보조 목록 전표는 같은 판정 문구를 씁니다(탐지 대상과 건수는 그대로).
     support = set(summary.loc[summary["검토 구분"] == SUPPORT_GROUP, "전표번호"])
