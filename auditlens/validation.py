@@ -35,6 +35,7 @@ class ValidationResult:
     issues: list = field(default_factory=list)
     clean: pd.DataFrame = None  # 표준 열 이름, 변환된 자료형, 제외 행이 빠진 표
     excluded_rows: list = field(default_factory=list)  # 분석에서 제외한 파일 행 번호
+    excluded_detail: pd.DataFrame = None  # 제외한 행의 파일 행 번호·전표번호·계정코드·계정과목명·사유
     summary: dict = field(default_factory=dict)
 
     @property
@@ -188,12 +189,18 @@ def validate_journal(raw: pd.DataFrame, mapping: dict) -> ValidationResult:
         if file_col:
             work[std_col] = raw[file_col]
     excluded = set()
+    reasons = {}  # DataFrame 행 번호 → 제외 사유 목록
+
+    def exclude(indices, texts):
+        excluded.update(indices)
+        for i, text in zip(indices, texts):
+            reasons.setdefault(i, []).append(text)
 
     # V5 필수 값 결측 (전표번호, 회계처리일, 계정코드는 없으면 분석에서 제외)
     for col in ["je_id", "posting_date", "account_code"]:
         blank_idx = [i for i, v in work[col].items() if _is_blank(v)]
         if blank_idx:
-            excluded.update(blank_idx)
+            exclude(blank_idx, [f"{COLUMN_LABELS[col]} 없음"] * len(blank_idx))
             _add(result, WARNING, "V5", _label(col),
                  f"'{COLUMN_LABELS[col]}' 값이 비어 있는 행이 {len(blank_idx)}개 있습니다.",
                  f"해당 행에 '{COLUMN_LABELS[col]}'을(를) 채워 주세요. 이 행들은 분석에서 제외됩니다.",
@@ -216,7 +223,7 @@ def validate_journal(raw: pd.DataFrame, mapping: dict) -> ValidationResult:
             bad_vals.append(str(exc))
             parsed_dates[i] = None
     if bad_idx:
-        excluded.update(bad_idx)
+        exclude(bad_idx, [f"회계처리일 형식 오류('{v}')" for v in bad_vals])
         _add(result, WARNING, "V3", _label("posting_date"),
              f"날짜로 읽을 수 없는 회계처리일이 {len(bad_idx)}개 행에 있습니다.",
              "YYYY-MM-DD 형식(예: 2025-03-31)으로 고쳐 주세요. 존재하지 않는 날짜(예: 2025-02-30)도 "
@@ -257,7 +264,7 @@ def validate_journal(raw: pd.DataFrame, mapping: dict) -> ValidationResult:
                 bad_vals.append(str(exc))
                 values[i] = 0.0
         if bad_idx:
-            excluded.update(bad_idx)
+            exclude(bad_idx, [f"{COLUMN_LABELS[col]} 형식 오류('{v}')" for v in bad_vals])
             _add(result, WARNING, "V4", _label(col),
                  f"숫자로 읽을 수 없는 {COLUMN_LABELS[col]}이 {len(bad_idx)}개 행에 있습니다.",
                  "숫자만 입력해 주세요(예: 1500000 또는 1,500,000). 이 행들은 분석에서 제외됩니다.",
@@ -295,6 +302,14 @@ def validate_journal(raw: pd.DataFrame, mapping: dict) -> ValidationResult:
 
     work["account_code"] = work["account_code"].map(_normalize_code)
     work["je_id"] = work["je_id"].map(lambda v: "" if _is_blank(v) else str(v).strip())
+    result.excluded_detail = pd.DataFrame(
+        [{"file_row": file_row_number(i), "je_id": work.at[i, "je_id"],
+          "account_code": work.at[i, "account_code"],
+          "account_name": "" if _is_blank(work.at[i, "account_name"]) else str(work.at[i, "account_name"]).strip(),
+          "사유": ", ".join(reasons[i])}
+         for i in sorted(reasons)],
+        columns=["file_row", "je_id", "account_code", "account_name", "사유"],
+    )
 
     # V9 완전히 같은 행 (원본 파일의 모든 열 기준)
     dup_mask = raw.astype(str).duplicated(keep="first")
@@ -317,19 +332,28 @@ def validate_journal(raw: pd.DataFrame, mapping: dict) -> ValidationResult:
         result.excluded_rows = [file_row_number(i) for i in sorted(excluded)]
         return result
 
-    # V8 전표별 차대 균형
+    # V8 전표별 차대 균형. 제외된 행이 하나라도 있는 전표는 균형 여부를 확정할 수 없으므로 '검증 불가'로 따로 셉니다.
+    unverifiable = sorted(set(result.excluded_detail["je_id"]) - {""})
     totals = clean.groupby("je_id")[["debit", "credit"]].sum()
     diff = (totals["debit"] - totals["credit"]).abs()
-    unbalanced = diff[diff > BALANCE_TOLERANCE]
+    unbalanced = diff[(diff > BALANCE_TOLERANCE) & ~diff.index.isin(unverifiable)]
     if len(unbalanced):
         shown = ", ".join(f"{je}(차이 {d:,.0f}원)" for je, d in unbalanced.head(MAX_EXAMPLES).items())
         more = len(unbalanced) - min(len(unbalanced), MAX_EXAMPLES)
         _add(result, WARNING, "V8", "전표별 차대 균형",
-             f"차변 합계와 대변 합계가 다른 전표가 {len(unbalanced)}개 있습니다: "
+             f"차변 합계와 대변 합계가 다른 전표가 {len(unbalanced)}개 있습니다(분개 오류 의심 - 검토 필요): "
              f"{shown}{f' 외 {more}개' if more else ''}",
-             "해당 전표의 라인이 빠졌거나 금액이 잘못 입력되었는지 확인해 주세요. "
-             "형식 오류로 제외된 행 때문에 생긴 차이일 수도 있습니다.",
+             "해당 전표의 라인이 빠졌거나 금액이 잘못 입력되었는지 확인해 주세요.",
              list(unbalanced.index), "")
+    if unverifiable:
+        shown = ", ".join(unverifiable[:MAX_EXAMPLES])
+        more = len(unverifiable) - min(len(unverifiable), MAX_EXAMPLES)
+        _add(result, WARNING, "V8", "전표별 차대 균형 (검증 불가)",
+             f"분석에서 제외된 행이 포함된 전표가 {len(unverifiable)}개 있어 차대 균형을 확인할 수 없습니다: "
+             f"{shown}{f' 외 {more}개' if more else ''}",
+             "제외된 행의 날짜·금액 형식이나 빠진 값을 고치면 균형 여부를 확인할 수 있습니다. "
+             "이 전표들은 불균형 전표 수에 넣지 않습니다.",
+             unverifiable, "")
 
     # V11 계정코드 하나에 계정과목명이 여러 개
     names = clean.groupby("account_code")["account_name"].nunique()

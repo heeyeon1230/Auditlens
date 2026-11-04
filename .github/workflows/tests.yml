@@ -1,0 +1,20 @@
+# PR을 올리거나 브랜치에 커밋을 올릴 때마다 GitHub에서 자동으로 pytest를 실행합니다.
+name: tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  pytest:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: 필요한 라이브러리 설치
+        run: pip install -r requirements.txt
+      - name: 테스트 실행
+        run: python -m pytest -q
