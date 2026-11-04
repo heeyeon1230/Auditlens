@@ -11,7 +11,7 @@ import pytest
 
 from auditlens.analysis import prepare
 from auditlens.detection import (
-    REVIEW_LABEL, DetectionSettings, business_days_between, closing_date, r1_amount_outliers,
+    PERIOD_LABEL, REVIEW_LABEL, DetectionSettings, business_days_between, closing_date, r1_amount_outliers,
     r2_monthly_pattern, r2_vendor_history, r3_timing, run_detection,
 )
 
@@ -42,7 +42,7 @@ def spread(n, base=100_000, start=date(2025, 1, 6)):
 def test_r1_flags_line_far_above_account_distribution():
     entries = [pair(f"N{i}", d, a) for i, (d, a) in enumerate(spread(100))]
     entries.append(pair("BIG", date(2025, 6, 2), 2_000_000))  # 중앙값의 약 20배
-    hits, skipped = r1_amount_outliers(journal(entries))
+    hits, skipped, _ = r1_amount_outliers(journal(entries))
     flagged = hits[hits["계정코드"] == "X100"]
     assert flagged["전표번호"].tolist() == ["BIG"]
     row = flagged.iloc[0]
@@ -55,14 +55,14 @@ def test_r1_flags_line_far_above_account_distribution():
 def test_r1_does_not_flag_ordinary_large_line():
     entries = [pair(f"N{i}", d, a) for i, (d, a) in enumerate(spread(100))]
     entries.append(pair("SLIGHT", date(2025, 6, 2), 120_000))  # 중앙값의 1.2배: 정상 범위
-    hits, _ = r1_amount_outliers(journal(entries))
+    hits = r1_amount_outliers(journal(entries))[0]
     assert hits.empty
 
 
 def test_r1_skips_small_account_and_reports_it():
     entries = [pair(f"N{i}", d, a) for i, (d, a) in enumerate(spread(10))]
     entries.append(pair("BIG", date(2025, 6, 2), 50_000_000))
-    hits, skipped = r1_amount_outliers(journal(entries))
+    hits, skipped, _ = r1_amount_outliers(journal(entries))
     assert hits.empty
     assert set(skipped["계정코드"]) == {"X100", "Y900"}
     assert (skipped["라인 수"] == 11).all() and skipped["사유"].str.contains("30건 미만").all()
@@ -74,8 +74,30 @@ def test_r1_compares_debit_and_credit_separately():
                for i, (d, a) in enumerate(spread(100))]
     entries += [("C%d" % i, d, [("Z1", "현금", a, 0), ("A1", "미지급비용", 0, a)], {})
                 for i, (d, a) in enumerate(spread(40, base=10_000_000))]
-    hits, _ = r1_amount_outliers(journal(entries))
+    hits = r1_amount_outliers(journal(entries))[0]
     assert hits.empty
+
+
+def test_r1_zero_negative_and_two_sided_lines_are_listed_not_dropped():
+    """로그로 바꿀 수 없는 라인은 비교에서 빼되, 금액을 바꾸지 않고 사유와 함께 따로 돌려줘야 합니다."""
+    entries = [pair(f"N{i}", d, a) for i, (d, a) in enumerate(spread(100))]
+    entries.append(pair("BIG", date(2025, 6, 2), 2_000_000))
+    entries.append(("REV", date(2025, 6, 3), [("X100", "출장비", -2_000_000, 0), ("Y900", "현금성자산", 0, -2_000_000)], {}))
+    entries.append(("ZERO", date(2025, 6, 4), [("X100", "출장비", 0, 0), ("Y900", "현금성자산", 0, 0)], {}))
+    entries.append(("BOTH", date(2025, 6, 5), [("X100", "출장비", 500, 300), ("Y900", "현금성자산", 0, 200)], {}))
+    hits, skipped, excluded = r1_amount_outliers(journal(entries))
+    # 정상 비교는 그대로: 탐지는 BIG뿐이고 비교 라인 수에 제외 라인이 섞이지 않음
+    x100 = hits[hits["계정코드"] == "X100"]
+    assert x100["전표번호"].tolist() == ["BIG"] and x100.iloc[0]["비교 라인 수"] == 101
+    # 제외 라인 5개가 사유와 함께 남아 있고, 음수 금액은 절대값으로 바뀌지 않음
+    by = {(r["전표번호"], r["계정코드"]): r for r in excluded.to_dict("records")}
+    assert len(excluded) == 5
+    assert by[("REV", "X100")]["금액"] == -2_000_000 and by[("REV", "X100")]["방향"] == "차변"
+    assert "음수 금액" in by[("REV", "X100")]["제외 사유"]
+    assert by[("REV", "Y900")]["방향"] == "대변"
+    assert "0원" in by[("ZERO", "X100")]["제외 사유"]
+    assert "차변과 대변이 모두" in by[("BOTH", "X100")]["제외 사유"]
+    assert ("BOTH", "Y900") not in by  # 대변 200원만 있는 정상 라인은 비교 대상
 
 
 def test_r1_settings_change_threshold():
@@ -94,34 +116,54 @@ def vendor_history(amounts, vendor="거래처A", start=date(2025, 1, 6)):
 
 def test_r2a_flags_amount_far_above_vendor_history():
     entries = vendor_history([1_000_000, 1_100_000, 900_000, 1_050_000, 950_000, 10_000_000])
-    hits, notes = r2_vendor_history(journal(entries))
+    hits = r2_vendor_history(journal(entries))[0]
     debit_hits = hits[hits["방향"] == "차변"]
     assert debit_hits["전표번호"].tolist() == ["V5"]
     row = debit_hits.iloc[0]
     assert row["이전 거래 수"] == 5 and row["이전 거래 중앙값"] == 1_000_000
     assert row["중앙값 대비 배수"] == pytest.approx(10)
     assert row["이전 거래 기간"] == "2025-01-06 ~ 2025-02-03"
-    assert "거래처A" in row["탐지 이유"]
+    assert "거래처A" in row["탐지 이유"] and "기준 5건 이상" in row["탐지 이유"]
+    assert "5배(5,000,000원) 초과" in row["탐지 이유"]
+
+
+def test_r2a_exactly_five_times_median_is_not_flagged():
+    """기준은 중앙값의 5배 '초과'이므로 정확히 5배는 탐지하지 않습니다."""
+    hits = r2_vendor_history(journal(vendor_history([1_000_000] * 5 + [5_000_000])))[0]
+    assert hits.empty
+    hits = r2_vendor_history(journal(vendor_history([1_000_000] * 5 + [5_000_001])))[0]
+    assert len(hits[hits["방향"] == "차변"]) == 1
+
+
+def test_r2a_uses_only_earlier_lines_as_history():
+    """6번째 라인은 앞선 5건과 비교되고, 같은 묶음의 뒤쪽 거래는 비교 대상에 들어가지 않습니다."""
+    amounts = [1_000_000] * 5 + [6_000_000] + [50_000_000] * 10
+    hits = r2_vendor_history(journal(vendor_history(amounts)))[0]
+    debit = hits[hits["방향"] == "차변"].set_index("전표번호")
+    assert debit.loc["V5", "이전 거래 수"] == 5 and debit.loc["V5", "이전 거래 중앙값"] == 1_000_000
 
 
 def test_r2a_does_not_flag_within_ratio():
     entries = vendor_history([1_000_000, 1_100_000, 900_000, 1_050_000, 950_000, 4_900_000])
-    hits, _ = r2_vendor_history(journal(entries))
+    hits = r2_vendor_history(journal(entries))[0]
     assert hits.empty
 
 
 def test_r2a_skips_when_prior_history_too_short():
     entries = vendor_history([1_000_000, 1_000_000, 1_000_000, 1_000_000, 50_000_000])  # 이전 거래 4건
-    hits, notes = r2_vendor_history(journal(entries))
+    hits, status, skipped = r2_vendor_history(journal(entries))
     assert hits.empty
-    assert any("5건 미만" in n for n in notes)
+    counts = status.set_index("구분")["라인 수"]
+    assert counts["이전 거래 부족"] == 10 and counts["비교함"] == 0  # 차변·대변 각 5줄
+    assert skipped["제외 사유"].str.contains("기준 5건 미만").all()
+    assert "이전 거래 4건" in skipped.iloc[-1]["제외 사유"]
 
 
 def test_r2a_same_day_lines_are_not_prior_history():
     day = date(2025, 3, 3)
     entries = [pair(f"S{i}", day, 1_000_000, vendor="거래처A") for i in range(5)]
     entries.append(pair("S5", day, 50_000_000, vendor="거래처A"))
-    hits, _ = r2_vendor_history(journal(entries))
+    hits = r2_vendor_history(journal(entries))[0]
     assert hits.empty
 
 
@@ -129,15 +171,29 @@ def test_r2a_separates_vendors_and_reports_blank_vendor():
     entries = vendor_history([1_000_000] * 5, vendor="거래처A")
     entries.append(pair("B1", date(2025, 6, 2), 20_000_000, vendor="거래처B"))  # 다른 거래처와 비교하지 않음
     entries.append(pair("NOV", date(2025, 6, 3), 20_000_000, vendor=""))
-    hits, notes = r2_vendor_history(journal(entries))
+    hits, status, skipped = r2_vendor_history(journal(entries))
     assert hits.empty
-    assert any("거래처가 비어 있는 라인 2건" in n for n in notes)
+    assert status.set_index("구분").loc["거래처 없음", "라인 수"] == 2
+    assert sorted(skipped[skipped["제외 사유"].str.contains("거래처가 비어")]["전표번호"]) == ["NOV", "NOV"]
+
+
+def test_r2a_status_accounts_for_every_line():
+    entries = vendor_history([1_000_000] * 5 + [9_000_000])
+    entries.append(pair("NOV", date(2025, 6, 3), 1_000, vendor=""))
+    entries.append(("ZERO", date(2025, 6, 4), [("X100", "출장비", 0, 0), ("Y900", "현금성자산", 0, 0)], {"vendor": "거래처A"}))
+    hits, status, skipped = r2_vendor_history(journal(entries))
+    counts = status.set_index("구분")["라인 수"]
+    assert counts["전체 라인"] == 16  # 거래처A 6전표×2 + NOV 2 + ZERO 2
+    assert counts["금액 문제로 비교하지 않음"] + counts["거래처 없음"] + counts["이전 거래 부족"] + counts["비교함"] == 16
+    assert counts["그중 탐지"] == len(hits) == 2 and counts["금액 문제로 비교하지 않음"] == 2
 
 
 def test_r2a_without_vendor_column_is_off_with_note():
     entries = [pair(f"N{i}", d, a) for i, (d, a) in enumerate(spread(10))]
-    hits, notes = r2_vendor_history(journal(entries))
-    assert hits.empty and "검사하지 않았습니다" in notes[0]
+    hits, status, skipped = r2_vendor_history(journal(entries))
+    assert hits.empty
+    row = status.set_index("구분").loc["거래처 없음"]
+    assert row["라인 수"] == 20 and "거래처 열 자체가 없음" in row["설명"]
 
 
 # ---------------------------------------------------------------- R2 (b)
@@ -158,7 +214,7 @@ def test_r2b_flags_month_with_spike_and_month_with_drop():
     assert set(zip(x100["연월"], x100["구분"])) == {("2025-06", "급증"), ("2025-09", "급감")}
     june = x100[x100["연월"] == "2025-06"].iloc[0]
     assert june["이 달 값"] == 40 and june["다른 달 중앙값"] == 10 and june["비교한 달 수"] == 11
-    assert june["판정"] == REVIEW_LABEL
+    assert june["판정"] == PERIOD_LABEL  # 개별 거래가 아니라 계정-월(기간)에 대한 표시
 
 
 def test_r2b_does_not_flag_normal_variation():
@@ -189,7 +245,8 @@ def test_business_days_and_closing_date_helpers():
 def timing(entries_spec, **settings):
     entries = [pair(je, p, 1_000_000, entry_date=pd.Timestamp(e) if e else pd.NaT)
                for je, p, e in entries_spec]
-    return r3_timing(journal(entries), DetectionSettings(**settings))
+    table, notes, _ = r3_timing(journal(entries), DetectionSettings(**settings))
+    return table, notes
 
 
 def test_r3a_closing_window_boundaries():
@@ -210,7 +267,23 @@ def test_r3a_month_end_only_when_option_on():
     spec = [("M0530", date(2025, 5, 30), None)]  # 5월 말일(토) 직전 금요일
     assert timing(spec)[0].empty
     on, _ = timing(spec, r3_month_end=True)
-    assert on["해당 조건"].tolist() == ["(a) 월말 전후"]
+    assert on["해당 조건"].tolist() == ["(a-2) 매월 말일 전후"]
+
+
+def test_r3_counts_month_end_separately_even_when_off():
+    """보조 옵션이 꺼져 있어도 (a-2) 해당 전표 수를 따로 세어, 켰을 때 얼마나 늘어나는지 보여 줍니다."""
+    entries = [pair("M0530", date(2025, 5, 30), 1_000_000), pair("D1230", date(2025, 12, 30), 1_000_000),
+               pair("MID", date(2025, 5, 15), 1_000_000)]
+    df = journal(entries)
+    off, _, counts_off = r3_timing(df)
+    on, _, counts_on = r3_timing(df, DetectionSettings(r3_month_end=True))
+    c_off = counts_off.set_index("조건")
+    assert c_off.loc["(a) 결산일 전후", "해당 전표 수"] == 1        # 12월 말일은 결산일이므로 (a)로만 셈
+    assert c_off.loc["(a-2) 매월 말일 전후", "해당 전표 수"] == 1
+    assert "꺼짐" in c_off.loc["(a-2) 매월 말일 전후", "탐지 결과 포함"]
+    assert off["전표번호"].tolist() == ["D1230"]
+    assert sorted(on["전표번호"]) == ["D1230", "M0530"]
+    assert counts_on.set_index("조건").loc["(a-2) 매월 말일 전후", "탐지 결과 포함"].startswith("포함")
 
 
 def test_r3a_uses_user_closing_date():
@@ -245,8 +318,9 @@ def test_r3c_weekend_entry():
 
 def test_r3_without_entry_date_turns_off_b_and_c():
     entries = [pair("SAT", date(2025, 9, 12), 1_000_000)]
-    table, notes = r3_timing(journal(entries))
+    table, notes, counts = r3_timing(journal(entries))
     assert table.empty and "(b)" in notes[0] and "(c)" in notes[0]
+    assert "검사 안 함" in counts.set_index("조건").loc["(c) 주말 입력", "탐지 결과 포함"]
 
 
 def test_r3_missing_entry_for_some_vouchers_is_reported():

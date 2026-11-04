@@ -107,10 +107,18 @@ def test_검토_대상_거래_화면이_표시됨():
     at = AppTest.from_file(APP, default_timeout=180).run()
     assert not at.exception
     assert any(h.value == "5. 검토 대상 거래 (R1~R3)" for h in at.header)
-    assert [t.label for t in at.tabs][3:] == ["종합 (전표별)", "R1 금액 분포", "R2 과거 패턴", "R3 시점", "기준·한계"]
-    assert any("오류나 부정으로 확정한 것이 아닙니다" in w.value for w in at.warning)
+    assert [t.label for t in at.tabs][3:] == ["종합 (전표별)", "R1 금액 분포", "R2(a) 거래처 이전 거래", "R3 시점"]
+    notice = " ".join(w.value for w in at.warning)
+    assert "오류나 부정으로 확정한 것이 아닙니다" in notice and "탐지되지 않은 거래가 정상 거래라는 뜻도 아닙니다" in notice
+    subheaders = [h.value for h in at.subheader]
+    assert "5-1. 개별 거래 탐지 결과 (R1 · R2(a) · R3)" in subheaders
+    assert "5-2. 이상 기간 탐지 결과 (R2(b) · 계정-월)" in subheaders
+    assert any("개별 거래가 아니라 계정과 월의 조합" in i.value for i in at.info)
     metrics = {m.label: m.value for m in at.metric}
     assert int(metrics["R1 라인"]) > 0 and int(metrics["R3 전표"].replace(",", "")) > 0
+    assert int(metrics["검토 대상 기간 (계정-월)"]) > 0
+    periods = [d.value for d in at.dataframe if "연월" in d.value.columns and "판정" in d.value.columns][0]
+    assert (periods["판정"] == "검토 대상 기간 (계정-월)").all()
     summary = at.dataframe[[i for i, d in enumerate(at.dataframe) if "해당 규칙 수" in d.value.columns][0]].value
     assert (summary["판정"] == "검토 대상 거래").all()
     assert summary["해당 규칙 수"].is_monotonic_decreasing
@@ -119,10 +127,13 @@ def test_검토_대상_거래_화면이_표시됨():
 def test_탐지_기준을_바꾸면_다시_계산됨():
     at = AppTest.from_file(APP, default_timeout=180).run()
     before = int({m.label: m.value for m in at.metric}["R3 전표"].replace(",", ""))
+    counts = [d.value for d in at.dataframe if "탐지 결과 포함" in d.value.columns][0].set_index("조건")
+    extra = counts.loc["(a-2) 매월 말일 전후", "해당 전표 수"]
+    assert extra > 0 and "꺼짐" in counts.loc["(a-2) 매월 말일 전후", "탐지 결과 포함"]
     at.checkbox(key="det_r3_month_end").check().run()
     assert not at.exception
     after = int({m.label: m.value for m in at.metric}["R3 전표"].replace(",", ""))
-    assert after > before
+    assert before < after <= before + extra  # (b)·(c)로 이미 표시된 전표는 다시 세지 않음
 
 
 def test_선택_열이_없는_다른_업종_파일도_탐지_화면이_표시됨():
@@ -139,4 +150,6 @@ def test_선택_열이_없는_다른_업종_파일도_탐지_화면이_표시됨
     metrics = {m.label: m.value for m in at.metric}
     assert metrics["R1 라인"] == "2" and metrics["R2(a) 라인"] == "0"
     captions = " ".join(c.value for c in at.caption)
-    assert "거래처 열이 없거나" in captions and "입력일시 열이 없거나" in captions
+    assert "입력일시 열이 없거나" in captions
+    status = [d.value for d in at.dataframe if "구분" in d.value.columns and "설명" in d.value.columns][0]
+    assert "거래처 열 자체가 없음" in status.set_index("구분").loc["거래처 없음", "설명"]
