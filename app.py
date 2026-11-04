@@ -1,8 +1,8 @@
 """AuditLens 화면 (Streamlit).
 
 실행: streamlit run app.py
-현재 버전: 1) 데이터 불러오기  2) 열 연결  3) 데이터 검증  4) 기초 분석
-이상 징후 탐지·결과 다운로드는 다음 개발 단위에서 추가합니다.
+현재 버전: 1) 데이터 불러오기  2) 열 연결  3) 데이터 검증  4) 기초 분석  5) 검토 대상 거래(R1~R3)
+탐지 규칙 R4~R6과 결과 다운로드는 다음 개발 단위에서 추가합니다.
 """
 
 import pandas as pd
@@ -13,6 +13,8 @@ from auditlens.analysis import (
     compare_years, fiscal_years, key_account_summary, monthly_summary, overview, prepare,
     unbalanced_vouchers, unverifiable_vouchers, voucher_lines,
 )
+from auditlens.detection import RULES, DetectionSettings, run_detection
+from auditlens.detection import REVIEW_LABEL as DETECTION_LABEL
 from auditlens.loader import LoadError, list_excel_sheets, read_uploaded_file
 from auditlens.sample_data import (
     COMPANY_NAME, CURRENT_YEAR, FICTIONAL_NOTICE, PRIOR_YEAR, generate_error_example,
@@ -54,8 +56,8 @@ st.info(
 
 with st.sidebar:
     st.header("진행 단계")
-    st.markdown("1. 데이터 불러오기\n2. 열 연결\n3. 데이터 검증\n4. 기초 분석")
-    st.caption("이상 징후 탐지, 결과 다운로드는 다음 개발 단위에서 추가될 예정입니다.")
+    st.markdown("1. 데이터 불러오기\n2. 열 연결\n3. 데이터 검증\n4. 기초 분석\n5. 검토 대상 거래 (R1~R3)")
+    st.caption("탐지 규칙 R4~R6, 결과 다운로드는 다음 개발 단위에서 추가될 예정입니다.")
 
 # ---------------------------------------------------------------- 1. 데이터 불러오기
 st.header("1. 데이터 불러오기")
@@ -408,3 +410,156 @@ with tab_month:
                    "구분해서 봐야 합니다.")
         if codes == []:
             st.warning("선택한 구분에 해당하는 계정이 없어 모든 값이 0입니다.")
+
+
+# ---------------------------------------------------------------- 5. 검토 대상 거래 (R1~R3)
+st.header("5. 검토 대상 거래 (R1~R3)")
+st.warning(
+    f"여기 표시되는 거래는 '{DETECTION_LABEL}'입니다. 정해진 기준에서 벗어나 감사인이 먼저 살펴볼 만한 거래라는 뜻이며, "
+    "오류나 부정으로 확정한 것이 아닙니다. 각 거래의 탐지 이유와 판단 근거, 규칙의 한계를 함께 확인해 주세요."
+)
+st.caption(f"분석 기준: 4단계 기초 분석과 같은 {len(df):,}행(검증에서 제외된 행은 탐지 대상이 아님) · 금액 단위: 원 · "
+           "계정은 계정코드로 구분하며 특정 업종의 계정 체계를 가정하지 않습니다.")
+
+defaults = DetectionSettings()
+with st.expander("탐지 기준 설정 (기본값은 설계서 6절)"):
+    a1, a2, a3 = st.columns(3)
+    closing_month = a1.number_input("결산월", 1, 12, defaults.closing_month, key="det_closing_month")
+    closing_day = a1.number_input("결산일", 1, 31, defaults.closing_day, key="det_closing_day",
+                                  help="그 달에 없는 날이면 그 달 말일로 맞춥니다(예: 2월 30일 → 2월 28일).")
+    r3_window = a1.number_input("R3(a) 결산일 전후 영업일 수", 0, 10, defaults.r3_window, key="det_r3_window")
+    r3_month_end = a1.checkbox("R3(a) 매월 말일 전후도 포함", defaults.r3_month_end, key="det_r3_month_end",
+                               help="켜면 매달 말일 전후 거래가 모두 후보가 되어 건수가 크게 늘어납니다.")
+    r1_multiplier = a2.number_input("R1 IQR 배수", 0.5, 10.0, defaults.r1_multiplier, 0.5, key="det_r1_mult")
+    r1_min_lines = a2.number_input("R1 계정·방향별 최소 라인 수", 5, 1000, defaults.r1_min_lines, key="det_r1_min")
+    r2_ratio = a3.number_input("R2(a) 이전 거래 중앙값 대비 배수", 1.5, 100.0, defaults.r2_ratio, 0.5, key="det_r2_ratio")
+    r2_min_prior = a3.number_input("R2(a) 최소 이전 거래 수", 2, 100, defaults.r2_min_prior, key="det_r2_min")
+    r2_month_high = a3.number_input("R2(b) 상한 배수 (이상이면 급증)", 1.5, 20.0, defaults.r2_month_high, 0.5,
+                                    key="det_r2_high")
+    r2_month_low = a3.number_input("R2(b) 하한 배수 (이하이면 급감)", 0.01, 0.9, round(defaults.r2_month_low, 2), 0.01,
+                                   key="det_r2_low")
+settings = DetectionSettings(
+    r1_multiplier=float(r1_multiplier), r1_min_lines=int(r1_min_lines), r2_ratio=float(r2_ratio),
+    r2_min_prior=int(r2_min_prior), r2_month_high=float(r2_month_high), r2_month_low=float(r2_month_low),
+    r3_window=int(r3_window), r3_month_end=bool(r3_month_end), closing_month=int(closing_month),
+    closing_day=int(closing_day),
+)
+
+
+@st.cache_data(show_spinner="탐지 규칙을 적용하는 중입니다...")
+def cached_detection(frame, settings_items):
+    return run_detection(frame, DetectionSettings(**dict(settings_items)))
+
+
+det = cached_detection(df, tuple(sorted(vars(settings).items())))
+
+m1, m2, m3, m4, m5 = st.columns(5)
+m1.metric("검토 대상 전표 (R1·R2(a)·R3)", f"{len(det.summary):,}")
+m2.metric("R1 라인", f"{len(det.r1):,}")
+m3.metric("R2(a) 라인", f"{len(det.r2a):,}")
+m4.metric("R2(b) 계정-월", f"{len(det.r2b):,}")
+m5.metric("R3 전표", f"{len(det.r3):,}")
+
+
+def rule_box(code):
+    rule = RULES[code]
+    st.markdown(f"**{code}. {rule['이름']}** (판단 단위: {rule['단위']})")
+    st.caption(f"목적: {rule['목적']}  \n조건: {rule['조건']}  \n한계: {rule['한계']}")
+
+
+def show_table(table, money_cols, date_cols=("회계처리일",), key=None):
+    shown = table.copy()
+    for col in date_cols:
+        if col in shown:
+            shown[col] = pd.to_datetime(shown[col]).dt.strftime("%Y-%m-%d").fillna("")
+    if "입력일시" in shown:
+        shown["입력일시"] = pd.to_datetime(shown["입력일시"]).dt.strftime("%Y-%m-%d %H:%M").fillna("")
+    styled = money(shown, money_cols)
+    if "중앙값 대비 배수" in shown:
+        styled = styled.format("{:,.2f}", subset=["중앙값 대비 배수"])
+    st.dataframe(styled, hide_index=True, use_container_width=True,
+                 column_config={"탐지 이유": st.column_config.TextColumn(width="large")}, key=key)
+
+
+tab_sum, tab_r1, tab_r2, tab_r3, tab_basis = st.tabs(
+    ["종합 (전표별)", "R1 금액 분포", "R2 과거 패턴", "R3 시점", "기준·한계"])
+
+with tab_sum:
+    if det.summary.empty:
+        st.success("현재 기준으로 R1·R2(a)·R3에 해당하는 전표가 없습니다. 탐지되지 않았다고 문제가 없다는 뜻은 아닙니다.")
+    else:
+        st.caption("한 전표가 여러 규칙에 해당하면 규칙을 모두 적고, 해당 규칙 수가 많은 순서로 보여 줍니다. "
+                   "점수나 위험도 등급은 매기지 않습니다. R2(b)는 계정-월 단위라 'R2 과거 패턴' 탭에 따로 있습니다.")
+        show_table(det.summary, ["전표 금액"], key="det_summary")
+        pick = st.selectbox("상세를 볼 전표", det.summary["전표번호"], key="det_pick")
+        row = det.summary.set_index("전표번호").loc[pick]
+        st.markdown(f"**{pick}** · {row['해당 규칙']} · {DETECTION_LABEL}")
+        for reason in row["탐지 이유"].split(" ["):
+            st.write(("- " if reason.startswith("[") else "- [") + reason)
+        show_voucher_lines(pick, result.excluded_detail)
+
+with tab_r1:
+    rule_box("R1")
+    if det.r1.empty:
+        st.info("현재 기준으로 R1에 해당하는 라인이 없습니다.")
+    else:
+        show_table(det.r1, ["금액", "계정 중앙값", "상한 금액"], key="det_r1")
+    if len(det.r1_skipped):
+        with st.expander(f"검사하지 않은 계정·방향 {len(det.r1_skipped)}개 (라인 수 부족)"):
+            st.dataframe(det.r1_skipped, hide_index=True, use_container_width=True)
+
+with tab_r2:
+    rule_box("R2")
+    st.markdown("**(a) 거래처별 이전 거래 대비**")
+    for note in det.r2a_notes:
+        st.caption(f"참고: {note}")
+    if det.r2a.empty:
+        st.info("현재 기준으로 R2(a)에 해당하는 라인이 없습니다.")
+    else:
+        show_table(det.r2a, ["금액", "이전 거래 중앙값"], key="det_r2a")
+    st.markdown("**(b) 계정별 월 건수·금액**")
+    if det.r2b.empty:
+        st.info("현재 기준으로 R2(b)에 해당하는 계정-월이 없습니다.")
+    else:
+        shown = det.r2b.copy()
+        shown["이 달 값"] = [f"{v:,.0f}" for v in shown["이 달 값"]]
+        shown["다른 달 중앙값"] = [f"{v:,.0f}" for v in shown["다른 달 중앙값"]]
+        st.dataframe(shown.style.format("{:,.2f}", subset=["중앙값 대비 배수"]), hide_index=True,
+                     use_container_width=True, column_config={"탐지 이유": st.column_config.TextColumn(width="large")})
+        st.caption("값의 단위는 '항목'이 라인 수이면 건, 금액이면 원입니다. 거래가 없는 달은 0으로 비교합니다.")
+        options = [f"{r.계정코드} {r.계정과목명} · {r.연월}" for r in det.r2b.drop_duplicates(["계정코드", "연월"])
+                   .itertuples(index=False)]
+        choice = st.selectbox("그 달의 거래 보기", options, key="det_r2b_pick")
+        code, ym = choice.split(" ")[0], choice.split(" · ")[-1]
+        month_lines = df[(df["account_code"] == code) & (df["year_month"] == ym)]
+        lines_shown = month_lines[["file_row", "je_id", "posting_date", "account_code", "account_name", "debit", "credit"]
+                                  + (["vendor"] if "vendor" in month_lines else [])]
+        lines_shown = lines_shown.rename(columns={**COLUMN_LABELS, "file_row": "파일 행 번호"})
+        show_table(lines_shown, ["차변금액", "대변금액"], key="det_r2b_lines")
+        st.caption(f"{ym} {code} 라인 {len(month_lines):,}건. 이 라인들은 한 건씩 검토 대상으로 올리지 않았습니다"
+                   "(설계서 6절: 해당 월의 모든 라인을 후보로 올리면 후보가 지나치게 많아짐).")
+
+with tab_r3:
+    rule_box("R3")
+    for note in det.r3_notes:
+        st.caption(f"참고: {note}")
+    st.caption(f"적용 기준: 결산일 매년 {settings.closing_month}월 {settings.closing_day}일, 전후 {settings.r3_window}영업일"
+               f"{', 매월 말일 포함' if settings.r3_month_end else ' (매월 말일은 포함하지 않음)'}.")
+    if det.r3.empty:
+        st.info("현재 기준으로 R3에 해당하는 전표가 없습니다.")
+    else:
+        conditions = ["전체"] + sorted({c for v in det.r3["해당 조건"] for c in v.split(", ")})
+        cond = st.radio("조건별 보기", conditions, horizontal=True, key="det_r3_cond")
+        table = det.r3 if cond == "전체" else det.r3[det.r3["해당 조건"].str.contains(cond, regex=False)]
+        st.caption(f"{len(table):,}개 전표")
+        show_table(table, ["전표 금액"], key="det_r3")
+
+with tab_basis:
+    st.markdown("**현재 적용한 기준값**")
+    st.dataframe(settings.as_table().astype(str), hide_index=True, use_container_width=True)
+    st.markdown("**규칙별 목적·조건·한계**")
+    st.dataframe(pd.DataFrame([{"규칙": k, **v} for k, v in RULES.items()]), hide_index=True,
+                 use_container_width=True)
+    st.caption("공통 한계: 탐지 기준은 올린 파일 안의 비교에 근거하며 회사의 업무 내용, 증빙, 내부통제를 알지 못합니다. "
+               "탐지되지 않은 거래가 문제가 없다는 뜻이 아니며(미탐), 탐지된 거래 대부분은 정상일 수 있습니다(오탐). "
+               "감사기준서 240의 관련 문단은 원문을 확인한 뒤 인용할 예정이며, 이 화면에는 아직 인용하지 않았습니다.")
