@@ -13,7 +13,7 @@ from auditlens.analysis import (
     compare_years, fiscal_years, key_account_summary, monthly_summary, overview, prepare,
     unbalanced_vouchers, unverifiable_vouchers, voucher_lines,
 )
-from auditlens.detection import RULES, DetectionSettings, run_detection
+from auditlens.detection import RULE_SWITCHES, RULES, DetectionSettings, run_detection
 from auditlens.detection import PERIOD_LABEL, PRIORITY_GROUP, SUPPORT_GROUP, SUPPORT_LABEL, period_vouchers
 from auditlens.detection import REVIEW_LABEL as DETECTION_LABEL
 from auditlens.loader import LoadError, list_excel_sheets, read_uploaded_file
@@ -425,53 +425,104 @@ st.caption(f"분석 기준: 4단계 기초 분석과 같은 {len(df):,}행(검�
            "계정은 계정코드로 구분하며 특정 업종의 계정 체계를 가정하지 않습니다.")
 
 defaults = DetectionSettings()
-with st.expander("탐지 기준 설정 (기본값은 설계서 6절)"):
-    a1, a2, a3 = st.columns(3)
-    closing_month = a1.number_input("결산월", 1, 12, defaults.closing_month, key="det_closing_month")
-    closing_day = a1.number_input("결산일", 1, 31, defaults.closing_day, key="det_closing_day",
-                                  help="그 달에 없는 날이면 그 달 말일로 맞춥니다(예: 2월 30일 → 2월 28일).")
-    r3_window = a1.number_input("R3(a) 전후 영업일 수", 0, 10, defaults.r3_window, key="det_r3_window")
-    r3_month_end = a1.checkbox("R3(a-2) 매월 말일 전후 (보조 옵션)", defaults.r3_month_end, key="det_r3_month_end",
-                               help="기본은 결산일 전후만 봅니다. 켜면 매달 말일 전후 전표가 (a-2) 조건으로 추가됩니다.")
-    r1_multiplier = a2.number_input("R1 IQR 배수", 0.5, 10.0, defaults.r1_multiplier, 0.5, key="det_r1_mult")
-    r1_min_lines = a2.number_input("R1 계정·방향별 최소 라인 수", 5, 1000, defaults.r1_min_lines, key="det_r1_min")
-    r2_ratio = a3.number_input("R2(a) 이전 거래 중앙값 대비 배수", 1.5, 100.0, defaults.r2_ratio, 0.5, key="det_r2_ratio")
-    r2_min_prior = a3.number_input("R2(a) 최소 이전 거래 수", 2, 100, defaults.r2_min_prior, key="det_r2_min")
-    r2_month_high = a3.number_input("R2(b) 상한 배수 (이상이면 급증)", 1.5, 20.0, defaults.r2_month_high, 0.5,
-                                    key="det_r2_high")
-    r2_month_low = a3.number_input("R2(b) 하한 배수 (이하이면 급감)", 0.01, 0.9, round(defaults.r2_month_low, 2), 0.01,
-                                   key="det_r2_low")
+# 탐지 기준 입력칸의 이름표(key). '기본값으로 되돌리기'는 이 값들을 지워 입력칸이 기본값으로 다시 그려지게 합니다.
+SETTING_KEYS = ["det_closing_month", "det_closing_day", "det_r3_window", "det_r3_month_end", "det_r1_mult", "det_r1_min",
+                "det_r2_ratio", "det_r2_min", "det_r2_high", "det_r2_low", "det_r4_src", "det_r4_type", "det_r4_rare",
+                "det_r4_kw", "det_r5_threshold", "det_r5_months", "det_r6_days"] + [f"det_on_{f}" for f in RULE_SWITCHES.values()]
 
-    def file_values(col):
-        """파일에 실제로 있는 값(앞뒤 공백 제거). 선택지는 이 값과 기본값을 합친 목록입니다."""
-        if col not in df:
-            return []
-        return sorted(v for v in df[col].fillna("").astype(str).str.strip().unique() if v)
 
-    st.markdown("**R4~R6**")
-    b1, b2, b3 = st.columns(3)
-    src_opts = sorted(set(file_values("source")) | set(defaults.r4_sources))
-    type_opts = sorted(set(file_values("je_type")) | set(defaults.r4_types))
-    r4_sources = b1.multiselect("R4(a) 수기로 볼 전표 원천 값", src_opts, list(defaults.r4_sources), key="det_r4_src",
-                                help="ERP마다 '수기'를 나타내는 값이 다르므로 파일에 있는 값 중에서 고릅니다.")
-    r4_types = b1.multiselect("R4(a) 조정으로 볼 전표 유형 값", type_opts, list(defaults.r4_types), key="det_r4_type")
-    r4_rare_pct = b2.number_input("R4(c) 입력자 전표 비율 기준 (% 미만)", 0.1, 50.0, defaults.r4_rare_share * 100, 0.5,
-                                  key="det_r4_rare")
-    r4_keywords = b2.text_input("R4(d) 적요 키워드 (쉼표로 구분)", ", ".join(defaults.r4_keywords), key="det_r4_kw")
-    r5_threshold = b3.number_input("R5 기준금액 (원, 입력해야 검사)", min_value=0, value=None, step=1_000_000,
-                                   key="det_r5_threshold", placeholder="예: 50000000",
-                                   help="설계서: 기준금액은 감사인의 중요성 판단에 따라 정합니다. 기본값이 없습니다.")
-    r5_months = b3.number_input("R5 분석 기간 마지막 n개월", 1, 12, defaults.r5_months, key="det_r5_months")
-    r6_days = b3.number_input("R6 회계처리일 차이 (일 이내)", 0, 60, defaults.r6_days, key="det_r6_days")
+def reset_detection_settings():
+    for k in SETTING_KEYS:
+        st.session_state.pop(k, None)
+
+
+def file_values(col):
+    """파일에 실제로 있는 값(앞뒤 공백 제거). 선택지는 이 값과 기본값을 합친 목록입니다."""
+    if col not in df:
+        return []
+    return sorted(v for v in df[col].fillna("").astype(str).str.strip().unique() if v)
+
+
+def rule_switch(box, rule):
+    field = RULE_SWITCHES[rule]
+    return box.toggle(f"{rule} 사용", getattr(defaults, field), key=f"det_on_{field}",
+                      help="끄면 이 규칙을 계산하지 않고 종합(전표별)에도 넣지 않습니다. 결과 탭에는 '꺼짐'으로 표시합니다.")
+
+
+with st.sidebar:
+    st.divider()
+    st.header("탐지 기준 설정")
+    st.caption("기본값은 설계서 6절과 이전 단계에서 확정한 값입니다. 값을 바꾸면 결과를 바로 다시 계산합니다.")
+    status_box = st.container()
+    st.button("기본값으로 되돌리기", on_click=reset_detection_settings, key="det_reset", use_container_width=True)
+
+    with st.expander("공통: 결산일"):
+        closing_month = st.number_input("결산월", 1, 12, defaults.closing_month, key="det_closing_month")
+        closing_day = st.number_input("결산일", 1, 31, defaults.closing_day, key="det_closing_day",
+                                      help="그 달에 없는 날이면 그 달 말일로 맞춥니다(예: 2월 30일 → 2월 28일). "
+                                           "R3와 R4(c)의 회계연도에 씁니다.")
+    with st.expander("R1 금액 분포"):
+        on = {"R1": rule_switch(st, "R1")}
+        r1_multiplier = st.number_input("R1 IQR 배수", 0.5, 10.0, defaults.r1_multiplier, 0.5, key="det_r1_mult")
+        r1_min_lines = st.number_input("R1 계정·방향별 최소 라인 수", 5, 1000, defaults.r1_min_lines, key="det_r1_min")
+    with st.expander("R2(a) 거래처 이전 거래"):
+        on["R2(a)"] = rule_switch(st, "R2(a)")
+        r2_ratio = st.number_input("R2(a) 이전 거래 중앙값 대비 배수", 1.5, 100.0, defaults.r2_ratio, 0.5,
+                                   key="det_r2_ratio")
+        r2_min_prior = st.number_input("R2(a) 최소 이전 거래 수", 2, 100, defaults.r2_min_prior, key="det_r2_min")
+    with st.expander("R2(b) 계정-월 이상 기간"):
+        on["R2(b)"] = rule_switch(st, "R2(b)")
+        r2_month_high = st.number_input("R2(b) 상한 배수 (이상이면 급증)", 1.5, 20.0, defaults.r2_month_high, 0.5,
+                                        key="det_r2_high")
+        r2_month_low = st.number_input("R2(b) 하한 배수 (이하이면 급감)", 0.01, 0.9, round(defaults.r2_month_low, 2), 0.01,
+                                       key="det_r2_low")
+    with st.expander("R3 시점"):
+        on["R3"] = rule_switch(st, "R3")
+        r3_window = st.number_input("R3(a) 전후 영업일 수", 0, 10, defaults.r3_window, key="det_r3_window")
+        r3_month_end = st.checkbox("R3(a-2) 매월 말일 전후 (보조 옵션)", defaults.r3_month_end, key="det_r3_month_end",
+                                   help="기본은 결산일 전후만 봅니다. 켜면 매달 말일 전후 전표가 (a-2) 조건으로 추가됩니다.")
+    with st.expander("R4 수기·조정"):
+        on["R4"] = rule_switch(st, "R4")
+        src_opts = sorted(set(file_values("source")) | set(defaults.r4_sources))
+        type_opts = sorted(set(file_values("je_type")) | set(defaults.r4_types))
+        r4_sources = st.multiselect("R4(a) 수기로 볼 전표 원천 값", src_opts, list(defaults.r4_sources), key="det_r4_src",
+                                    help="ERP마다 '수기'를 나타내는 값이 다르므로 파일에 있는 값 중에서 고릅니다.")
+        r4_types = st.multiselect("R4(a) 조정으로 볼 전표 유형 값", type_opts, list(defaults.r4_types), key="det_r4_type")
+        r4_rare_pct = st.number_input("R4(c) 입력자 전표 비율 기준 (% 미만)", 0.1, 50.0, defaults.r4_rare_share * 100, 0.5,
+                                      key="det_r4_rare")
+        r4_keywords = st.text_input("R4(d) 적요 키워드 (쉼표로 구분)", ", ".join(defaults.r4_keywords), key="det_r4_kw")
+    with st.expander("R5 신규 거래처"):
+        on["R5"] = rule_switch(st, "R5")
+        r5_threshold = st.number_input("R5 기준금액 (원, 입력해야 검사)", min_value=0, value=None, step=1_000_000,
+                                       key="det_r5_threshold", placeholder="예: 50000000",
+                                       help="설계서: 기준금액은 감사인의 중요성 판단에 따라 정합니다. 기본값이 없습니다.")
+        r5_months = st.number_input("R5 분석 기간 마지막 n개월", 1, 12, defaults.r5_months, key="det_r5_months")
+    with st.expander("R6 중복 가능"):
+        on["R6"] = rule_switch(st, "R6")
+        r6_days = st.number_input("R6 회계처리일 차이 (일 이내)", 0, 60, defaults.r6_days, key="det_r6_days")
+
 settings = DetectionSettings(
     r1_multiplier=float(r1_multiplier), r1_min_lines=int(r1_min_lines), r2_ratio=float(r2_ratio),
-    r2_min_prior=int(r2_min_prior), r2_month_high=float(r2_month_high), r2_month_low=float(r2_month_low),
+    r2_min_prior=int(r2_min_prior), r2_month_high=float(r2_month_high),
+    # 입력칸은 소수 둘째 자리(0.33)까지만 보여 주므로, 기본값 그대로면 설계서 기본값 1/3을 씁니다.
+    r2_month_low=defaults.r2_month_low if round(float(r2_month_low), 2) == round(defaults.r2_month_low, 2)
+    else float(r2_month_low),
     r3_window=int(r3_window), r3_month_end=bool(r3_month_end), closing_month=int(closing_month),
     closing_day=int(closing_day),
     r4_sources=tuple(r4_sources), r4_types=tuple(r4_types), r4_rare_share=float(r4_rare_pct) / 100,
     r4_keywords=tuple(k.strip() for k in r4_keywords.split(",") if k.strip()),
     r5_threshold=None if r5_threshold is None else float(r5_threshold), r5_months=int(r5_months), r6_days=int(r6_days),
+    **{RULE_SWITCHES[rule]: bool(v) for rule, v in on.items()},
 )
+changed = settings.changed()
+off_rules = settings.disabled_rules()
+with status_box:
+    st.metric("기본값과 다른 항목", f"{len(changed)}개")
+    if off_rules:
+        st.warning(f"꺼진 규칙: {', '.join(off_rules)}")
+    st.caption("기본값과 적용값 비교는 본문 5-3 '탐지 기준과 한계'에 있습니다.")
+st.caption(f"탐지 기준은 왼쪽 사이드바의 '탐지 기준 설정'에서 바꿀 수 있습니다. 기본값과 다른 항목 {len(changed)}개"
+           + (f", 꺼진 규칙: {', '.join(off_rules)}" if off_rules else ", 꺼진 규칙 없음") + ".")
 
 
 @st.cache_data(show_spinner="탐지 규칙을 적용하는 중입니다...")
@@ -483,9 +534,20 @@ det = cached_detection(df, tuple(sorted(vars(settings).items())))
 
 
 def rule_box(code):
+    """규칙 설명을 보여 주고, 규칙이 켜져 있으면 True. 꺼져 있으면 그 사실을 표시하고 False를 돌려줍니다."""
     rule = RULES[code]
     st.markdown(f"**{code}. {rule['이름']}** (판단 단위: {rule['단위']})")
     st.caption(f"목적: {rule['목적']}  \n조건: {rule['조건']}  \n한계: {rule['한계']}")
+    if code in off_rules:
+        st.warning(f"**{code} 규칙이 꺼져 있습니다.** 이 규칙은 계산하지 않았고, 결과는 종합(전표별)과 위 건수에도 들어가지 "
+                   "않았습니다. 꺼져 있어서 결과가 없는 것이며, 해당 거래가 없다는 뜻은 아닙니다. 다시 켜려면 왼쪽 사이드바 "
+                   f"'탐지 기준 설정'의 {code} 상자에서 '{code} 사용'을 켜 주세요.", icon="⏸️")
+        return False
+    return True
+
+
+def rule_count(code, n):
+    return "꺼짐" if code in off_rules else f"{n:,}"
 
 
 def show_table(table, money_cols, date_cols=("회계처리일",), key=None):
@@ -513,12 +575,12 @@ with st.container(border=True):
     support = det.summary[det.summary["검토 구분"] == SUPPORT_GROUP]
     m1.metric("우선 검토 전표", f"{len(priority):,}",
               help=f"종합 전표 {len(det.summary):,}개 중 수기·조정 여부만 해당하는 {len(support):,}개(보조 목록)를 뺀 수입니다.")
-    m2.metric("R1 라인", f"{len(det.r1):,}")
-    m3.metric("R2(a) 라인", f"{len(det.r2a):,}")
-    m4.metric("R3 전표", f"{len(det.r3):,}")
-    m5.metric("R4 전표", f"{len(det.r4):,}")
-    m6.metric("R5 거래처·조합", f"{len(det.r5):,}")
-    m7.metric("R6 전표 쌍", f"{len(det.r6):,}")
+    m2.metric("R1 라인", rule_count("R1", len(det.r1)))
+    m3.metric("R2(a) 라인", rule_count("R2(a)", len(det.r2a)))
+    m4.metric("R3 전표", rule_count("R3", len(det.r3)))
+    m5.metric("R4 전표", rule_count("R4", len(det.r4)))
+    m6.metric("R5 거래처·조합", rule_count("R5", len(det.r5)))
+    m7.metric("R6 전표 쌍", rule_count("R6", len(det.r6)))
 
     tab_sum, tab_r1, tab_r2a, tab_r3, tab_r4, tab_r5, tab_r6 = st.tabs(
         ["종합 (전표별)", "R1 금액 분포", "R2(a) 거래처 이전 거래", "R3 시점", "R4 수기·조정", "R5 신규 거래처", "R6 중복 가능"])
@@ -552,102 +614,103 @@ with st.container(border=True):
             show_voucher_lines(pick, result.excluded_detail)
 
     with tab_r1:
-        rule_box("R1")
-        if det.r1.empty:
-            st.info("현재 기준으로 R1에 해당하는 라인이 없습니다.")
-        else:
-            show_table(det.r1, ["금액", "계정 중앙값", "상한 금액"], key="det_r1")
-        if len(det.r1_excluded):
-            with st.expander(f"금액 비교에서 뺀 라인 {len(det.r1_excluded):,}건 (0원·음수·차대 동시 기재)"):
-                st.caption("로그는 0보다 큰 금액에만 쓸 수 있어 이 라인들은 R1 비교에 넣지 않았습니다. 금액은 파일 값 그대로이며, "
-                           "음수 금액(역분개 등)은 따로 확인해 주세요.")
-                show_table(det.r1_excluded, ["금액"], key="det_r1_excluded")
-        if len(det.r1_skipped):
-            with st.expander(f"검사하지 않은 계정·방향 {len(det.r1_skipped)}개 (라인 수 부족)"):
-                st.dataframe(det.r1_skipped, hide_index=True, use_container_width=True)
+        if rule_box("R1"):
+            if det.r1.empty:
+                st.info("현재 기준으로 R1에 해당하는 라인이 없습니다.")
+            else:
+                show_table(det.r1, ["금액", "계정 중앙값", "상한 금액"], key="det_r1")
+            if len(det.r1_excluded):
+                with st.expander(f"금액 비교에서 뺀 라인 {len(det.r1_excluded):,}건 (0원·음수·차대 동시 기재)"):
+                    st.caption("로그는 0보다 큰 금액에만 쓸 수 있어 이 라인들은 R1 비교에 넣지 않았습니다. 금액은 파일 값 그대로이며, "
+                               "음수 금액(역분개 등)은 따로 확인해 주세요.")
+                    show_table(det.r1_excluded, ["금액"], key="det_r1_excluded")
+            if len(det.r1_skipped):
+                with st.expander(f"검사하지 않은 계정·방향 {len(det.r1_skipped)}개 (라인 수 부족)"):
+                    st.dataframe(det.r1_skipped, hide_index=True, use_container_width=True)
 
     with tab_r2a:
-        rule_box("R2(a)")
-        st.markdown("**처리 현황**: 모든 라인이 아래 구분 중 하나에 들어갑니다.")
-        st.dataframe(det.r2a_status, hide_index=True, use_container_width=True,
-                     column_config={"설명": st.column_config.TextColumn(width="large")})
-        st.caption(f"적용 방법: 같은 거래처·계정·방향에서 회계처리일이 이 라인보다 앞선 거래만 기준으로 씁니다. 이 라인과 "
-                   "같은 날의 거래와 뒤의 거래(미래 거래)는 기준에 넣지 않습니다. 앞선 거래가 "
-                   f"{settings.r2_min_prior}건 이상일 때만 비교하고, 그 금액들의 중앙값 × {settings.r2_ratio:g}를 초과하면 탐지합니다.")
-        if det.r2a.empty:
-            st.info("현재 기준으로 R2(a)에 해당하는 라인이 없습니다.")
-        else:
-            show_table(det.r2a, ["금액", "이전 거래 중앙값"], key="det_r2a")
-        if len(det.r2a_skipped):
-            with st.expander(f"비교하지 않은 라인 {len(det.r2a_skipped):,}건과 사유"):
-                show_table(det.r2a_skipped, ["금액"], key="det_r2a_skipped")
+        if rule_box("R2(a)"):
+            st.markdown("**처리 현황**: 모든 라인이 아래 구분 중 하나에 들어갑니다.")
+            st.dataframe(det.r2a_status, hide_index=True, use_container_width=True,
+                         column_config={"설명": st.column_config.TextColumn(width="large")})
+            st.caption(f"적용 방법: 같은 거래처·계정·방향에서 회계처리일이 이 라인보다 앞선 거래만 기준으로 씁니다. 이 라인과 "
+                       "같은 날의 거래와 뒤의 거래(미래 거래)는 기준에 넣지 않습니다. 앞선 거래가 "
+                       f"{settings.r2_min_prior}건 이상일 때만 비교하고, 그 금액들의 중앙값 × {settings.r2_ratio:g}를 초과하면 탐지합니다.")
+            if det.r2a.empty:
+                st.info("현재 기준으로 R2(a)에 해당하는 라인이 없습니다.")
+            else:
+                show_table(det.r2a, ["금액", "이전 거래 중앙값"], key="det_r2a")
+            if len(det.r2a_skipped):
+                with st.expander(f"비교하지 않은 라인 {len(det.r2a_skipped):,}건과 사유"):
+                    show_table(det.r2a_skipped, ["금액"], key="det_r2a_skipped")
 
     with tab_r3:
-        rule_box("R3")
-        for note in det.r3_notes:
-            st.caption(f"참고: {note}")
-        st.markdown("**조건별 전표 수**")
-        st.dataframe(det.r3_counts, hide_index=True, use_container_width=True)
-        st.caption(f"적용 기준: 결산일 매년 {settings.closing_month}월 {settings.closing_day}일, 전후 {settings.r3_window}영업일. "
-                   "(a)는 회계처리일 기준, (b)·(c)는 입력일시 기준이며 입력일시가 없는 전표는 (b)·(c)를 검사하지 않습니다. "
-                   "(a-2)는 보조 옵션이며 꺼져 있어도 해당 전표 수를 위 표에 보여 줍니다. 한 전표가 여러 조건에 해당할 수 "
-                   "있어 조건별 수의 합은 R3 전표 수보다 클 수 있습니다.")
-        if det.r3.empty:
-            st.info("현재 기준으로 R3에 해당하는 전표가 없습니다.")
-        else:
-            conditions = ["전체"] + sorted({c for v in det.r3["해당 조건"] for c in v.split(", ")})
-            cond = st.radio("조건별 보기", conditions, horizontal=True, key="det_r3_cond")
-            table = det.r3 if cond == "전체" else det.r3[det.r3["해당 조건"].str.contains(cond, regex=False)]
-            st.caption(f"{len(table):,}개 전표")
-            show_table(table, ["전표 금액"], key="det_r3")
+        if rule_box("R3"):
+            for note in det.r3_notes:
+                st.caption(f"참고: {note}")
+            st.markdown("**조건별 전표 수**")
+            st.dataframe(det.r3_counts, hide_index=True, use_container_width=True)
+            st.caption(f"적용 기준: 결산일 매년 {settings.closing_month}월 {settings.closing_day}일, 전후 {settings.r3_window}영업일. "
+                       "(a)는 회계처리일 기준, (b)·(c)는 입력일시 기준이며 입력일시가 없는 전표는 (b)·(c)를 검사하지 않습니다. "
+                       "(a-2)는 보조 옵션이며 꺼져 있어도 해당 전표 수를 위 표에 보여 줍니다. 한 전표가 여러 조건에 해당할 수 "
+                       "있어 조건별 수의 합은 R3 전표 수보다 클 수 있습니다.")
+            if det.r3.empty:
+                st.info("현재 기준으로 R3에 해당하는 전표가 없습니다.")
+            else:
+                conditions = ["전체"] + sorted({c for v in det.r3["해당 조건"] for c in v.split(", ")})
+                cond = st.radio("조건별 보기", conditions, horizontal=True, key="det_r3_cond")
+                table = det.r3 if cond == "전체" else det.r3[det.r3["해당 조건"].str.contains(cond, regex=False)]
+                st.caption(f"{len(table):,}개 전표")
+                show_table(table, ["전표 금액"], key="det_r3")
 
     with tab_r4:
-        rule_box("R4")
-        for note in det.r4_notes:
-            st.caption(f"참고: {note}")
-        st.markdown("**조건별 전표 수**")
-        st.dataframe(det.r4_counts, hide_index=True, use_container_width=True)
-        st.caption("한 전표가 여러 조건에 해당할 수 있어 조건별 수의 합은 R4 전표 수보다 클 수 있습니다. 값은 앞뒤 공백만 빼고 "
-                   "파일에 적힌 그대로 비교합니다.")
-        if det.r4.empty:
-            st.info("현재 기준으로 R4에 해당하는 전표가 없습니다.")
-        else:
-            conditions = ["전체"] + sorted({c for v in det.r4["해당 조건"] for c in v.split(", ")})
-            cond = st.radio("조건별 보기", conditions, horizontal=True, key="det_r4_cond")
-            table = det.r4 if cond == "전체" else det.r4[det.r4["해당 조건"].str.contains(cond, regex=False)]
-            only_manual = set(support["전표번호"])
-            n_only = int(det.r4["전표번호"].isin(only_manual).sum())
-            combos = {"전체": None, f"(a)만 해당 ({n_only:,}개, 종합의 보조 목록)": True,
-                      f"다른 조건·규칙과 함께 ({len(det.r4) - n_only:,}개, 종합의 우선 검토 목록)": False}
-            combo = st.radio("다른 조건과의 결합", list(combos), horizontal=True, key="det_r4_combo")
-            if combos[combo] is not None:
-                table = table[table["전표번호"].isin(only_manual) == combos[combo]]
-            st.caption(f"{len(table):,}개 전표")
-            show_table(table, ["전표 금액"], key="det_r4")
+        if rule_box("R4"):
+            for note in det.r4_notes:
+                st.caption(f"참고: {note}")
+            st.markdown("**조건별 전표 수**")
+            st.dataframe(det.r4_counts, hide_index=True, use_container_width=True)
+            st.caption("한 전표가 여러 조건에 해당할 수 있어 조건별 수의 합은 R4 전표 수보다 클 수 있습니다. 값은 앞뒤 공백만 빼고 "
+                       "파일에 적힌 그대로 비교합니다.")
+            if det.r4.empty:
+                st.info("현재 기준으로 R4에 해당하는 전표가 없습니다.")
+            else:
+                conditions = ["전체"] + sorted({c for v in det.r4["해당 조건"] for c in v.split(", ")})
+                cond = st.radio("조건별 보기", conditions, horizontal=True, key="det_r4_cond")
+                table = det.r4 if cond == "전체" else det.r4[det.r4["해당 조건"].str.contains(cond, regex=False)]
+                only_manual = set(support["전표번호"])
+                n_only = int(det.r4["전표번호"].isin(only_manual).sum())
+                combos = {"전체": None, f"(a)만 해당 ({n_only:,}개, 종합의 보조 목록)": True,
+                          f"다른 조건·규칙과 함께 ({len(det.r4) - n_only:,}개, 종합의 우선 검토 목록)": False}
+                combo = st.radio("다른 조건과의 결합", list(combos), horizontal=True, key="det_r4_combo")
+                if combos[combo] is not None:
+                    table = table[table["전표번호"].isin(only_manual) == combos[combo]]
+                st.caption(f"{len(table):,}개 전표")
+                show_table(table, ["전표 금액"], key="det_r4")
 
     with tab_r5:
-        rule_box("R5")
-        for note in det.r5_notes:
-            st.caption(f"참고: {note}")
-        if settings.r5_threshold is None:
-            st.info("R5는 기준금액을 입력해야 검사합니다. '탐지 기준 설정'에서 기준금액(원)을 입력해 주세요.")
-        elif det.r5.empty:
-            st.info("현재 기준으로 R5에 해당하는 거래처·계정 조합이 없습니다.")
-        else:
-            show_table(det.r5, ["합계 금액", "기준금액"], date_cols=("최초 등장일",), key="det_r5")
-        if len(det.r5_candidates):
-            with st.expander(f"판단 기간에 처음 나타난 거래처·계정 조합 {len(det.r5_candidates):,}개 (기준금액 미만 포함, 참고용)"):
-                show_table(det.r5_candidates, ["합계 금액"], date_cols=("최초 등장일",), key="det_r5_cand")
+        if rule_box("R5"):
+            for note in det.r5_notes:
+                st.caption(f"참고: {note}")
+            if settings.r5_threshold is None:
+                st.info("R5는 기준금액을 입력해야 검사합니다. 왼쪽 사이드바 '탐지 기준 설정'의 R5 상자에서 "
+                        "기준금액(원)을 입력해 주세요.")
+            elif det.r5.empty:
+                st.info("현재 기준으로 R5에 해당하는 거래처·계정 조합이 없습니다.")
+            else:
+                show_table(det.r5, ["합계 금액", "기준금액"], date_cols=("최초 등장일",), key="det_r5")
+            if len(det.r5_candidates):
+                with st.expander(f"판단 기간에 처음 나타난 거래처·계정 조합 {len(det.r5_candidates):,}개 (기준금액 미만 포함, 참고용)"):
+                    show_table(det.r5_candidates, ["합계 금액"], date_cols=("최초 등장일",), key="det_r5_cand")
 
     with tab_r6:
-        rule_box("R6")
-        for note in det.r6_notes:
-            st.caption(f"참고: {note}")
-        if det.r6.empty:
-            st.info("현재 기준으로 R6에 해당하는 전표 쌍이 없습니다.")
-        else:
-            st.caption("한 쌍에서 일치한 라인을 모두 '일치 라인'에 적었습니다. 두 전표는 종합(전표별)에 모두 R6으로 들어갑니다.")
-            show_table(det.r6, ["일치 금액"], date_cols=("회계처리일 A", "회계처리일 B"), key="det_r6")
+        if rule_box("R6"):
+            for note in det.r6_notes:
+                st.caption(f"참고: {note}")
+            if det.r6.empty:
+                st.info("현재 기준으로 R6에 해당하는 전표 쌍이 없습니다.")
+            else:
+                st.caption("한 쌍에서 일치한 라인을 모두 '일치 라인'에 적었습니다. 두 전표는 종합(전표별)에 모두 R6으로 들어갑니다.")
+                show_table(det.r6, ["일치 금액"], date_cols=("회계처리일 A", "회계처리일 B"), key="det_r6")
 
 # ---- 5-2. 이상 기간 탐지 결과 (R2(b))
 with st.container(border=True):
@@ -655,43 +718,45 @@ with st.container(border=True):
     st.info(f"이 결과는 개별 거래가 아니라 계정과 월의 조합에 대한 징후입니다. 판정: {PERIOD_LABEL}. "
             "그 달의 거래 하나하나를 검토 대상 거래로 올리지 않았으며, 위 5-1의 종합 전표 수에도 들어가지 않습니다.",
             icon="📅")
-    st.metric("검토 대상 기간 (계정-월)", f"{det.r2b[['계정코드', '연월']].drop_duplicates().shape[0]:,}")
-    rule_box("R2(b)")
-    st.caption(f"적용 기준: 다른 달 중앙값의 {settings.r2_month_high:g}배 이상이면 급증, {settings.r2_month_low:.2f}배 이하이면 급감.")
-    if det.r2b.empty:
-        st.info("현재 기준으로 R2(b)에 해당하는 계정-월이 없습니다.")
-    else:
-        shown = det.r2b.copy()
-        shown["이 달 값"] = [f"{v:,.0f}" for v in shown["이 달 값"]]
-        shown["다른 달 중앙값"] = [f"{v:,.0f}" for v in shown["다른 달 중앙값"]]
-        st.dataframe(shown.style.format("{:,.2f}", subset=["중앙값 대비 배수"]), hide_index=True,
-                     use_container_width=True, column_config={"탐지 이유": st.column_config.TextColumn(width="large")})
-        st.caption("값의 단위는 '항목'이 라인 수이면 건, 금액이면 원입니다.")
+    st.metric("검토 대상 기간 (계정-월)", rule_count("R2(b)", det.r2b[['계정코드', '연월']].drop_duplicates().shape[0]))
+    if rule_box("R2(b)"):
+        st.caption(f"적용 기준: 다른 달 중앙값의 {settings.r2_month_high:g}배 이상이면 급증, {settings.r2_month_low:.2f}배 이하이면 급감.")
+        if det.r2b.empty:
+            st.info("현재 기준으로 R2(b)에 해당하는 계정-월이 없습니다.")
+        else:
+            shown = det.r2b.copy()
+            shown["이 달 값"] = [f"{v:,.0f}" for v in shown["이 달 값"]]
+            shown["다른 달 중앙값"] = [f"{v:,.0f}" for v in shown["다른 달 중앙값"]]
+            st.dataframe(shown.style.format("{:,.2f}", subset=["중앙값 대비 배수"]), hide_index=True,
+                         use_container_width=True, column_config={"탐지 이유": st.column_config.TextColumn(width="large")})
+            st.caption("값의 단위는 '항목'이 라인 수이면 건, 금액이면 원입니다.")
 
-        options = [f"{r.계정코드} {r.계정과목명} · {r.연월}" for r in det.r2b.drop_duplicates(["계정코드", "연월"])
-                   .itertuples(index=False)]
-        choice = st.selectbox("그 달의 거래 보기 (참고용)", options, key="det_r2b_pick")
-        code, ym = choice.split(" ")[0], choice.split(" · ")[-1]
-        month_lines = df[(df["account_code"] == code) & (df["year_month"] == ym)]
-        lines_shown = month_lines[["file_row", "je_id", "posting_date", "account_code", "account_name", "debit", "credit"]
-                                  + (["vendor"] if "vendor" in month_lines else [])]
-        lines_shown = lines_shown.rename(columns={**COLUMN_LABELS, "file_row": "파일 행 번호"})
-        show_table(lines_shown, ["차변금액", "대변금액"], key="det_r2b_lines")
-        st.caption(f"{ym} {code} 라인 {len(month_lines):,}건. 기간을 검토할 때 참고하도록 보여 주는 목록이며, "
-                   "이 라인들이 개별적으로 검토 대상이라는 뜻은 아닙니다.")
-        vouchers = period_vouchers(df, det.summary, code, ym)
-        groups = vouchers["종합 검토 구분"].value_counts()
-        st.markdown(f"**이 기간의 전표와 종합 결과** · {len(vouchers):,}개 전표")
-        st.caption(f"위 라인이 속한 전표를 한 행씩 모으고, 각 전표가 5-1 종합의 어느 목록에 있는지 붙였습니다. 우선 검토 목록 "
-                   f"{groups.get(PRIORITY_GROUP, 0):,}개, 보조 목록 {groups.get(SUPPORT_GROUP, 0):,}개, 개별 규칙에 해당하지 "
-                   f"않은 전표 {groups.get('해당 없음', 0):,}개입니다. '판정'과 '해당 규칙'은 종합의 결과를 그대로 옮긴 것이며, "
-                   "R2(b) 때문에 이 전표들을 개별 검토 대상 거래로 판정한 것은 아닙니다.")
-        show_table(vouchers, ["이 계정 금액", "전표 금액"], key="det_r2b_vouchers")
+            options = [f"{r.계정코드} {r.계정과목명} · {r.연월}" for r in det.r2b.drop_duplicates(["계정코드", "연월"])
+                       .itertuples(index=False)]
+            choice = st.selectbox("그 달의 거래 보기 (참고용)", options, key="det_r2b_pick")
+            code, ym = choice.split(" ")[0], choice.split(" · ")[-1]
+            month_lines = df[(df["account_code"] == code) & (df["year_month"] == ym)]
+            lines_shown = month_lines[["file_row", "je_id", "posting_date", "account_code", "account_name", "debit", "credit"]
+                                      + (["vendor"] if "vendor" in month_lines else [])]
+            lines_shown = lines_shown.rename(columns={**COLUMN_LABELS, "file_row": "파일 행 번호"})
+            show_table(lines_shown, ["차변금액", "대변금액"], key="det_r2b_lines")
+            st.caption(f"{ym} {code} 라인 {len(month_lines):,}건. 기간을 검토할 때 참고하도록 보여 주는 목록이며, "
+                       "이 라인들이 개별적으로 검토 대상이라는 뜻은 아닙니다.")
+            vouchers = period_vouchers(df, det.summary, code, ym)
+            groups = vouchers["종합 검토 구분"].value_counts()
+            st.markdown(f"**이 기간의 전표와 종합 결과** · {len(vouchers):,}개 전표")
+            st.caption(f"위 라인이 속한 전표를 한 행씩 모으고, 각 전표가 5-1 종합의 어느 목록에 있는지 붙였습니다. 우선 검토 목록 "
+                       f"{groups.get(PRIORITY_GROUP, 0):,}개, 보조 목록 {groups.get(SUPPORT_GROUP, 0):,}개, 개별 규칙에 해당하지 "
+                       f"않은 전표 {groups.get('해당 없음', 0):,}개입니다. '판정'과 '해당 규칙'은 종합의 결과를 그대로 옮긴 것이며, "
+                       "R2(b) 때문에 이 전표들을 개별 검토 대상 거래로 판정한 것은 아닙니다.")
+            show_table(vouchers, ["이 계정 금액", "전표 금액"], key="det_r2b_vouchers")
 
 # ---- 5-3. 기준·한계
 with st.expander("5-3. 탐지 기준과 한계"):
-    st.markdown("**현재 적용한 기준값**")
-    st.dataframe(settings.as_table().astype(str), hide_index=True, use_container_width=True)
+    st.markdown(f"**현재 적용한 기준값** · 기본값과 다른 항목 {len(changed)}개")
+    st.dataframe(settings.as_table().astype(str), hide_index=True, use_container_width=True, key="det_settings_table")
+    st.caption("'기본값과 다름'이 '예'인 항목이 사용자가 바꾼 설정입니다. 왼쪽 사이드바의 '기본값으로 되돌리기'로 한 번에 "
+               "기본값으로 돌아갑니다.")
     st.markdown("**규칙별 목적·조건·한계**")
     st.dataframe(pd.DataFrame([{"규칙": k, **v} for k, v in RULES.items()]), hide_index=True,
                  use_container_width=True)
