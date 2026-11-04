@@ -32,7 +32,7 @@ def test_기초_분석_화면이_표시됨():
     at = AppTest.from_file(APP, default_timeout=120).run()
     assert not at.exception
     assert any(h.value == "4. 기초 분석" for h in at.header)
-    assert [t.label for t in at.tabs] == ["전표 현황", "계정별 분석", "월별 분석·전기 비교"]
+    assert [t.label for t in at.tabs][:3] == ["전표 현황", "계정별 분석", "월별 분석·전기 비교"]  # 뒤는 5단계 탭
     metrics = {m.label: m.value for m in at.metric}
     assert metrics["전표 수"] == "4,590" and metrics["분개 라인 수"] == "9,326"
     assert metrics["차이: 차변 - 대변 (원)"] == "0"
@@ -101,3 +101,55 @@ def test_불균형과_검증_불가_전표를_나눠_표시():
     details = [t for t in tables if "구분" in t.columns]
     assert list(details[0]["파일 행 번호"]) == [4, 5]  # 불균형 전표 J2의 라인
     assert list(details[1]["구분"]) == ["분석 포함", "분석 제외"]  # 검증 불가 전표 J3의 라인
+
+
+def test_검토_대상_거래_화면이_표시됨():
+    at = AppTest.from_file(APP, default_timeout=180).run()
+    assert not at.exception
+    assert any(h.value == "5. 검토 대상 거래 (R1~R3)" for h in at.header)
+    assert [t.label for t in at.tabs][3:] == ["종합 (전표별)", "R1 금액 분포", "R2(a) 거래처 이전 거래", "R3 시점"]
+    notice = " ".join(w.value for w in at.warning)
+    assert "오류나 부정으로 확정한 것이 아닙니다" in notice and "탐지되지 않은 거래가 정상 거래라는 뜻도 아닙니다" in notice
+    subheaders = [h.value for h in at.subheader]
+    assert "5-1. 개별 거래 탐지 결과 (R1 · R2(a) · R3)" in subheaders
+    assert "5-2. 이상 기간 탐지 결과 (R2(b) · 계정-월)" in subheaders
+    assert any("개별 거래가 아니라 계정과 월의 조합" in i.value for i in at.info)
+    metrics = {m.label: m.value for m in at.metric}
+    assert int(metrics["R1 라인"]) > 0 and int(metrics["R3 전표"].replace(",", "")) > 0
+    assert int(metrics["검토 대상 기간 (계정-월)"]) > 0
+    periods = [d.value for d in at.dataframe if "연월" in d.value.columns and "판정" in d.value.columns][0]
+    assert (periods["판정"] == "검토 대상 기간 (계정-월)").all()
+    summary = at.dataframe[[i for i, d in enumerate(at.dataframe) if "해당 규칙 수" in d.value.columns][0]].value
+    assert (summary["판정"] == "검토 대상 거래").all()
+    assert summary["해당 규칙 수"].is_monotonic_decreasing
+
+
+def test_탐지_기준을_바꾸면_다시_계산됨():
+    at = AppTest.from_file(APP, default_timeout=180).run()
+    before = int({m.label: m.value for m in at.metric}["R3 전표"].replace(",", ""))
+    counts = [d.value for d in at.dataframe if "탐지 결과 포함" in d.value.columns][0].set_index("조건")
+    extra = counts.loc["(a-2) 매월 말일 전후", "해당 전표 수"]
+    assert extra > 0 and "꺼짐" in counts.loc["(a-2) 매월 말일 전후", "탐지 결과 포함"]
+    at.checkbox(key="det_r3_month_end").check().run()
+    assert not at.exception
+    after = int({m.label: m.value for m in at.metric}["R3 전표"].replace(",", ""))
+    assert before < after <= before + extra  # (b)·(c)로 이미 표시된 전표는 다시 세지 않음
+
+
+def test_선택_열이_없는_다른_업종_파일도_탐지_화면이_표시됨():
+    """필수 6개 열만 있고 계정 체계가 다른(서비스업 가정) 파일: R2(a)·R3(b)(c)는 꺼지고 이유가 표시돼야 합니다."""
+    lines = ["전표번호,회계처리일,계정코드,계정과목명,차변금액,대변금액"]
+    for i in range(40):
+        day = f"2025-{1 + i % 12:02d}-{10 + i % 15:02d}"
+        lines += [f"S{i},{day},6100,교육훈련비,{200000 + i * 1000},0", f"S{i},{day},1010,현금,0,{200000 + i * 1000}"]
+    lines += ["BIG,2025-06-11,6100,교육훈련비,90000000,0", "BIG,2025-06-11,1010,현금,0,90000000"]
+    at = AppTest.from_file(APP, default_timeout=180).run()
+    at.radio[0].set_value("내 파일 업로드").run()
+    at.file_uploader[0].upload("서비스업.csv", "\n".join(lines).encode("utf-8"), "text/csv").run()
+    assert not at.exception
+    metrics = {m.label: m.value for m in at.metric}
+    assert metrics["R1 라인"] == "2" and metrics["R2(a) 라인"] == "0"
+    captions = " ".join(c.value for c in at.caption)
+    assert "입력일시 열이 없거나" in captions
+    status = [d.value for d in at.dataframe if "구분" in d.value.columns and "설명" in d.value.columns][0]
+    assert "거래처 열 자체가 없음" in status.set_index("구분").loc["거래처 없음", "설명"]
