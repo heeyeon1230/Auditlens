@@ -728,6 +728,10 @@ REASON_COLUMNS = ["전표번호", "규칙", "대상", "탐지 이유"]
 PRIORITY_GROUP = "우선 검토"
 SUPPORT_GROUP = "보조 (수기·조정 여부만 해당)"
 R4_MANUAL_ID = "R4(a)"  # R4 (a) 수기·조정 전표
+SUPPORT_LABEL = "수기·조정 전표(보조 정보)"  # 보조 목록 전표의 판정 문구 (수기 전표 자체를 위험으로 보지 않음)
+NO_GROUP = "해당 없음"
+PERIOD_VOUCHER_COLUMNS = ["전표번호", "회계처리일", "이 계정 라인 수", "이 계정 금액", "포함 계정", "전표 금액", "종합 검토 구분",
+                          "판정", "해당 규칙"]
 
 
 @dataclass
@@ -803,7 +807,7 @@ def summarize(df, r1, r2a, r3, extra=()):
         # 해당 세부 조건이 R4(a) 하나뿐이면 보조 목록, 그 밖에는 우선 검토 목록입니다.
         return SUPPORT_GROUP if v["conditions"] == [R4_MANUAL_ID] else PRIORITY_GROUP
 
-    rows = [{"전표번호": je, "판정": REVIEW_LABEL, "검토 구분": group(v), "해당 규칙 수": len(v["rules"]),
+    rows = [{"전표번호": je, "판정": SUPPORT_LABEL if group(v) == SUPPORT_GROUP else REVIEW_LABEL, "검토 구분": group(v), "해당 규칙 수": len(v["rules"]),
              "해당 규칙": ", ".join(v["rules"]), "해당 세부 조건 수": len(v["conditions"]),
              "해당 세부 조건": ", ".join(v["conditions"]),
              "회계처리일": v["date"], "포함 계정": accounts.get(je, ""), "전표 금액": totals.get(je, 0.0),
@@ -827,6 +831,11 @@ def run_detection(df, settings=None):
     r5, r5_notes, r5_candidates = r5_new_vendors(df, s)
     r6, r6_notes = r6_duplicates(df, s)
     summary, reasons = summarize(df, r1, r2a, r3, _extra_reasons(df, r4, r5, r6))
+    # R4 표에서도 종합의 보조 목록 전표는 같은 판정 문구를 씁니다(탐지 대상과 건수는 그대로).
+    support = set(summary.loc[summary["검토 구분"] == SUPPORT_GROUP, "전표번호"])
+    if support:
+        r4 = r4.copy()
+        r4.loc[r4["전표번호"].isin(support), "판정"] = SUPPORT_LABEL
     return DetectionResult(s, r1, r1_skipped, r1_excluded, r2a, r2a_status, r2a_skipped, r2b, r3, r3_notes,
                            r3_counts, summary, reasons, r4, r4_notes, r4_counts, r5, r5_notes, r5_candidates, r6, r6_notes)
 
@@ -849,3 +858,33 @@ def _extra_reasons(df, r4, r5, r6):
             out.append({"전표번호": row[me], "회계처리일": dates.get(row[me]), "규칙": "R6",
                         "대상": f"짝 전표 {row[other]} · {row['일치 라인']}", "탐지 이유": row["탐지 이유"]})
     return out
+
+
+def period_vouchers(df, summary, account_code, ym):
+    """R2(b) 이상 기간(계정-월)에 속한 전표 목록. 각 전표가 종합의 어느 목록에 있는지(없으면 '해당 없음') 함께 적습니다.
+
+    R2(b) 판정을 전표로 옮기지 않습니다. 이 기간의 전표를 찾아가기 위한 목록이며, 순서는 우선 검토 → 보조 → 해당 없음,
+    그 안에서 회계처리일 순입니다.
+    """
+    if len(df) == 0:
+        return pd.DataFrame(columns=PERIOD_VOUCHER_COLUMNS)
+    lines = _lines(df)
+    mask = (lines["account_code"] == account_code) & (lines["posting_date"].dt.strftime("%Y-%m") == ym)
+    part = lines[mask]
+    if part.empty:
+        return pd.DataFrame(columns=PERIOD_VOUCHER_COLUMNS)
+    ids = part["je_id"].unique()
+    info = _voucher_frame(df[df["je_id"].isin(ids)])
+    found = summary.set_index("전표번호")
+    rows = []
+    for je, g in part.groupby("je_id", sort=False):
+        hit = je in found.index
+        rows.append({"전표번호": je, "회계처리일": g["posting_date"].min(), "이 계정 라인 수": len(g),
+                     "이 계정 금액": float(g["amount"].sum()), "포함 계정": info[je]["포함 계정"],
+                     "전표 금액": info[je]["전표 금액"],
+                     "종합 검토 구분": found.loc[je, "검토 구분"] if hit else NO_GROUP,
+                     "판정": found.loc[je, "판정"] if hit else "", "해당 규칙": found.loc[je, "해당 규칙"] if hit else ""})
+    order = {PRIORITY_GROUP: 0, SUPPORT_GROUP: 1, NO_GROUP: 2}
+    table = pd.DataFrame(rows, columns=PERIOD_VOUCHER_COLUMNS)
+    table["_o"] = table["종합 검토 구분"].map(order)
+    return table.sort_values(["_o", "회계처리일", "전표번호"]).drop(columns="_o").reset_index(drop=True)

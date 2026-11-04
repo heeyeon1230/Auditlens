@@ -10,8 +10,8 @@ import pandas as pd
 
 from auditlens.analysis import prepare
 from auditlens.detection import (
-    PRIORITY_GROUP, REVIEW_LABEL, SUPPORT_GROUP, DetectionSettings, r4_manual_entries, r5_new_vendors, r6_duplicates,
-    run_detection,
+    PRIORITY_GROUP, REVIEW_LABEL, SUPPORT_GROUP, SUPPORT_LABEL, DetectionSettings, period_vouchers, r4_manual_entries,
+    r5_new_vendors, r6_duplicates, run_detection,
 )
 from tests.test_detection import journal, pair
 
@@ -242,13 +242,19 @@ def test_summary_puts_manual_only_vouchers_in_support_group():
     entries = [auto(f"N{i}") for i in range(200)]
     entries += [manual("ONLY"), manual("SAME", created_by="batch", approved_by="batch"),
                 manual("NODESC", description=""), auto("AUTO_SAME", created_by="batch", approved_by="batch")]
-    summary = run_detection(journal(entries)).summary.set_index("전표번호")
+    result = run_detection(journal(entries))
+    summary = result.summary.set_index("전표번호")
     assert summary.loc["ONLY", "검토 구분"] == SUPPORT_GROUP
     assert summary.loc["ONLY", "해당 세부 조건"] == "R4(a)"
     for je in ["SAME", "NODESC", "AUTO_SAME"]:  # (a)와 다른 조건이 함께 있거나, (a)가 아닌 조건만 있는 전표
         assert summary.loc[je, "검토 구분"] == PRIORITY_GROUP
+        assert summary.loc[je, "판정"] == REVIEW_LABEL
     assert summary.loc["SAME", "해당 세부 조건"] == "R4(a), R4(b)"
-    assert (summary["판정"] == REVIEW_LABEL).all()  # 보조 목록도 검토 대상 거래 문구 그대로
+    # 보조 목록 전표는 '검토 대상 거래'가 아니라 보조 정보 문구로 표시하고, R4 표에서도 같은 문구를 씁니다.
+    assert summary.loc["ONLY", "판정"] == SUPPORT_LABEL
+    r4_labels = result.r4.set_index("전표번호")["판정"]
+    assert r4_labels["ONLY"] == SUPPORT_LABEL and r4_labels["SAME"] == REVIEW_LABEL
+    assert set(result.r4["전표번호"]) == {"ONLY", "SAME", "NODESC", "AUTO_SAME"}  # R4 탐지 대상은 그대로
 
 
 def test_summary_manual_with_other_rule_is_priority():
@@ -277,6 +283,22 @@ def test_summary_without_source_columns_has_no_support_group():
     entries += [pair("P1", date(2025, 5, 14), 777_000, vendor="V"), pair("P2", date(2025, 5, 16), 777_000, vendor="V")]
     summary = run_detection(journal(entries)).summary
     assert len(summary) and (summary["검토 구분"] == PRIORITY_GROUP).all()
+
+
+def test_period_vouchers_lists_vouchers_of_flagged_account_month_with_summary_group():
+    entries = [auto(f"N{i}", day=date(2025, 3, 10)) for i in range(200)]
+    entries += [manual("M_ONLY", day=date(2025, 6, 10)), auto("A_PLAIN", day=date(2025, 6, 11)),
+                manual("M_SAME", day=date(2025, 6, 12), created_by="batch", approved_by="batch"),
+                auto("OTHER_MONTH", day=date(2025, 7, 1))]
+    df = journal(entries)
+    result = run_detection(df)
+    table = period_vouchers(df, result.summary, "X100", "2025-06")
+    assert table["전표번호"].tolist() == ["M_SAME", "M_ONLY", "A_PLAIN"]  # 우선 → 보조 → 해당 없음
+    assert table["종합 검토 구분"].tolist() == [PRIORITY_GROUP, SUPPORT_GROUP, "해당 없음"]
+    assert table["판정"].tolist() == [REVIEW_LABEL, SUPPORT_LABEL, ""]
+    assert table.iloc[0]["이 계정 금액"] == 100_000 and table.iloc[0]["이 계정 라인 수"] == 1
+    assert period_vouchers(df, result.summary, "X100", "2024-01").empty
+    assert period_vouchers(df.iloc[0:0], result.summary, "X100", "2025-06").empty
 
 
 def test_detection_does_not_change_input_data():
@@ -342,3 +364,20 @@ def test_sample_answer_key_review_groups():
     assert (group == PRIORITY_GROUP).sum() == 137 and (group == SUPPORT_GROUP).sum() == 570
     order = summary.index.tolist()
     assert order.index(ids["A06"][0]) < 30  # R4 조건 4개 전표가 1개 규칙 전표 중 앞쪽에 옴
+
+
+def test_sample_a03_vouchers_reachable_from_r2b_period():
+    """A03은 보조 목록이지만, R2(b) 이상 기간(824 운반비 2025-06)의 전표 목록에서 36개 모두 찾을 수 있습니다."""
+    from auditlens.sample_data import generate_sample_journal
+    from auditlens.schema import suggest_mapping
+    from auditlens.validation import validate_journal
+
+    raw, key = generate_sample_journal()
+    df, _ = prepare(validate_journal(raw, suggest_mapping(raw.columns)).clean)
+    result = run_detection(df)
+    a03 = set(key.loc[key["시나리오"] == "A03", "전표번호 전체"].iloc[0].split(", "))
+    flagged = result.r2b[(result.r2b["계정코드"] == "824") & (result.r2b["연월"] == "2025-06")]
+    assert len(flagged)
+    table = period_vouchers(df, result.summary, "824", "2025-06")
+    assert a03 <= set(table["전표번호"])
+    assert (table.set_index("전표번호").loc[sorted(a03), "판정"] == SUPPORT_LABEL).all()

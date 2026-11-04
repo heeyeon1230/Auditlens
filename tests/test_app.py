@@ -126,6 +126,13 @@ def test_검토_대상_거래_화면이_표시됨():
     assert (summary["검토 구분"] == "우선 검토").all()  # 첫 종합표는 우선 검토 목록
     assert any(e.label.startswith("보조 목록: 수기·조정 여부(R4(a))만 해당하는 전표") for e in at.expander)
     assert int(metrics["우선 검토 전표"].replace(",", "")) == len(summary)
+    support = [d.value for d in at.dataframe if "검토 구분" in d.value.columns
+               and (d.value["검토 구분"] == "보조 (수기·조정 여부만 해당)").all() and len(d.value)][0]
+    assert (support["판정"] == "수기·조정 전표(보조 정보)").all()
+    at.selectbox(key="det_r2b_pick").set_value("824 운반비 · 2025-06").run()
+    assert not at.exception
+    period = [d.value for d in at.dataframe if "종합 검토 구분" in d.value.columns][0]
+    assert len(period) >= 36 and set(period["종합 검토 구분"]) <= {"우선 검토", "보조 (수기·조정 여부만 해당)", "해당 없음"}
 
 
 def test_탐지_기준을_바꾸면_다시_계산됨():

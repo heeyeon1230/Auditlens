@@ -14,7 +14,7 @@ from auditlens.analysis import (
     unbalanced_vouchers, unverifiable_vouchers, voucher_lines,
 )
 from auditlens.detection import RULES, DetectionSettings, run_detection
-from auditlens.detection import PERIOD_LABEL, PRIORITY_GROUP, SUPPORT_GROUP
+from auditlens.detection import PERIOD_LABEL, PRIORITY_GROUP, SUPPORT_GROUP, SUPPORT_LABEL, period_vouchers
 from auditlens.detection import REVIEW_LABEL as DETECTION_LABEL
 from auditlens.loader import LoadError, list_excel_sheets, read_uploaded_file
 from auditlens.sample_data import (
@@ -506,7 +506,8 @@ def show_table(table, money_cols, date_cols=("회계처리일",), key=None):
 # ---- 5-1. 개별 거래 탐지 결과
 with st.container(border=True):
     st.subheader("5-1. 개별 거래 탐지 결과 (R1 · R2(a) · R3 · R4 · R5 · R6)")
-    st.caption("전표나 분개 라인 하나하나에 대한 결과입니다. 판정: " + DETECTION_LABEL)
+    st.caption(f"전표나 분개 라인 하나하나에 대한 결과입니다. 판정: {DETECTION_LABEL}. 수기·조정 여부만 해당하는 전표는 "
+               f"'{SUPPORT_LABEL}'로 표시합니다.")
     m1, m2, m3, m4, m5, m6, m7 = st.columns(7)
     priority = det.summary[det.summary["검토 구분"] == PRIORITY_GROUP]
     support = det.summary[det.summary["검토 구분"] == SUPPORT_GROUP]
@@ -528,7 +529,7 @@ with st.container(border=True):
                    "규칙별 원래 결과는 옆의 규칙 탭에 있고, R2(b)는 아래 5-2에 따로 있습니다.")
         st.caption("수기·조정 전표라는 사실만으로는 오류나 부정을 뜻하지 않습니다. 그래서 R4(a) 수기·조정 여부 하나만 해당하는 "
                    "전표는 아래 보조 목록으로 나누고, 다른 규칙이나 R4의 다른 조건과 함께 나타난 전표를 우선 검토 목록에 "
-                   "두었습니다. 보조 목록도 R4 검토 대상 거래에 그대로 포함됩니다.")
+                   f"두었습니다. 보조 목록 전표의 판정은 '{SUPPORT_LABEL}'이며, R4 결과와 건수에는 그대로 남아 있습니다.")
         if det.summary.empty:
             st.success("현재 기준으로 R1~R6에 해당하는 전표가 없습니다. 탐지되지 않았다고 문제가 없다는 뜻은 아닙니다.")
         else:
@@ -544,7 +545,7 @@ with st.container(border=True):
             pick = st.selectbox("상세를 볼 전표", det.summary["전표번호"], key="det_pick")
             row = det.summary.set_index("전표번호").loc[pick]
             st.markdown(f"**{pick}** · {row['검토 구분']} · 해당 규칙 {row['해당 규칙 수']}개 ({row['해당 규칙']}) · "
-                        f"세부 조건 {row['해당 세부 조건 수']}개 ({row['해당 세부 조건']}) · {DETECTION_LABEL}")
+                        f"세부 조건 {row['해당 세부 조건 수']}개 ({row['해당 세부 조건']}) · {row['판정']}")
             st.dataframe(det.reasons[det.reasons["전표번호"] == pick].drop(columns="전표번호"), hide_index=True,
                          use_container_width=True, column_config={"탐지 이유": st.column_config.TextColumn(width="large")})
             st.caption("규칙별·라인별 탐지 사유를 모두 한 행씩 보여 줍니다. 아래는 이 전표의 전체 라인입니다.")
@@ -666,6 +667,7 @@ with st.container(border=True):
         st.dataframe(shown.style.format("{:,.2f}", subset=["중앙값 대비 배수"]), hide_index=True,
                      use_container_width=True, column_config={"탐지 이유": st.column_config.TextColumn(width="large")})
         st.caption("값의 단위는 '항목'이 라인 수이면 건, 금액이면 원입니다.")
+
         options = [f"{r.계정코드} {r.계정과목명} · {r.연월}" for r in det.r2b.drop_duplicates(["계정코드", "연월"])
                    .itertuples(index=False)]
         choice = st.selectbox("그 달의 거래 보기 (참고용)", options, key="det_r2b_pick")
@@ -677,6 +679,14 @@ with st.container(border=True):
         show_table(lines_shown, ["차변금액", "대변금액"], key="det_r2b_lines")
         st.caption(f"{ym} {code} 라인 {len(month_lines):,}건. 기간을 검토할 때 참고하도록 보여 주는 목록이며, "
                    "이 라인들이 개별적으로 검토 대상이라는 뜻은 아닙니다.")
+        vouchers = period_vouchers(df, det.summary, code, ym)
+        groups = vouchers["종합 검토 구분"].value_counts()
+        st.markdown(f"**이 기간의 전표와 종합 결과** · {len(vouchers):,}개 전표")
+        st.caption(f"위 라인이 속한 전표를 한 행씩 모으고, 각 전표가 5-1 종합의 어느 목록에 있는지 붙였습니다. 우선 검토 목록 "
+                   f"{groups.get(PRIORITY_GROUP, 0):,}개, 보조 목록 {groups.get(SUPPORT_GROUP, 0):,}개, 개별 규칙에 해당하지 "
+                   f"않은 전표 {groups.get('해당 없음', 0):,}개입니다. '판정'과 '해당 규칙'은 종합의 결과를 그대로 옮긴 것이며, "
+                   "R2(b) 때문에 이 전표들을 개별 검토 대상 거래로 판정한 것은 아닙니다.")
+        show_table(vouchers, ["이 계정 금액", "전표 금액"], key="det_r2b_vouchers")
 
 # ---- 5-3. 기준·한계
 with st.expander("5-3. 탐지 기준과 한계"):
