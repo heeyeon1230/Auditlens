@@ -10,7 +10,8 @@ import pandas as pd
 
 from auditlens.analysis import prepare
 from auditlens.detection import (
-    REVIEW_LABEL, DetectionSettings, r4_manual_entries, r5_new_vendors, r6_duplicates, run_detection,
+    PRIORITY_GROUP, REVIEW_LABEL, SUPPORT_GROUP, DetectionSettings, r4_manual_entries, r5_new_vendors, r6_duplicates,
+    run_detection,
 )
 from tests.test_detection import journal, pair
 
@@ -232,6 +233,52 @@ def test_summary_includes_r4_r6_with_all_reasons():
     assert "짝 전표 P2" in reasons[reasons["규칙"] == "R6"]["대상"].iloc[0]
 
 
+def manual(je, day=date(2025, 3, 10), **extra):
+    """평범한 수기 전표: 원천만 '수기'이고 입력자·승인자·적요는 자동 전표와 같은 평범한 값."""
+    return auto(je, day, **{"source": "수기", **extra})
+
+
+def test_summary_puts_manual_only_vouchers_in_support_group():
+    entries = [auto(f"N{i}") for i in range(200)]
+    entries += [manual("ONLY"), manual("SAME", created_by="batch", approved_by="batch"),
+                manual("NODESC", description=""), auto("AUTO_SAME", created_by="batch", approved_by="batch")]
+    summary = run_detection(journal(entries)).summary.set_index("전표번호")
+    assert summary.loc["ONLY", "검토 구분"] == SUPPORT_GROUP
+    assert summary.loc["ONLY", "해당 세부 조건"] == "R4(a)"
+    for je in ["SAME", "NODESC", "AUTO_SAME"]:  # (a)와 다른 조건이 함께 있거나, (a)가 아닌 조건만 있는 전표
+        assert summary.loc[je, "검토 구분"] == PRIORITY_GROUP
+    assert summary.loc["SAME", "해당 세부 조건"] == "R4(a), R4(b)"
+    assert (summary["판정"] == REVIEW_LABEL).all()  # 보조 목록도 검토 대상 거래 문구 그대로
+
+
+def test_summary_manual_with_other_rule_is_priority():
+    entries = [auto(f"N{i}", vendor="거래처Q") for i in range(200)]
+    p1 = purchase("P1", date(2025, 5, 14))
+    entries += [(*p1[:3], {**p1[3], "source": "수기"}), purchase("P2", date(2025, 5, 16))]
+    summary = run_detection(journal(entries)).summary.set_index("전표번호")
+    assert summary.loc["P1", "해당 규칙"] == "R4, R6" and summary.loc["P1", "검토 구분"] == PRIORITY_GROUP
+    assert summary.loc["P1", "해당 세부 조건 수"] == 2
+
+
+def test_summary_orders_by_rules_then_sub_conditions_then_date():
+    entries = [auto(f"N{i}") for i in range(200)]
+    entries += [manual("EARLY_ONLY", day=date(2025, 2, 3)),                                   # 보조: 날짜가 가장 빨라도 맨 뒤
+                auto("ONE", day=date(2025, 2, 4), created_by="batch", approved_by="batch"),   # R4 (b) 1개
+                manual("MANY", day=date(2025, 8, 1), created_by="batch", approved_by="batch",
+                       description="임시 처리")]                                               # R4 (a)(b)(d) 3개
+    summary = run_detection(journal(entries)).summary
+    assert summary["전표번호"].tolist() == ["MANY", "ONE", "EARLY_ONLY"]
+    assert summary["해당 규칙 수"].tolist() == [1, 1, 1]
+    assert summary["해당 세부 조건 수"].tolist() == [3, 1, 1]
+
+
+def test_summary_without_source_columns_has_no_support_group():
+    entries = [pair(f"N{i}", date(2025, 3, 10), 100_000) for i in range(50)]
+    entries += [pair("P1", date(2025, 5, 14), 777_000, vendor="V"), pair("P2", date(2025, 5, 16), 777_000, vendor="V")]
+    summary = run_detection(journal(entries)).summary
+    assert len(summary) and (summary["검토 구분"] == PRIORITY_GROUP).all()
+
+
 def test_detection_does_not_change_input_data():
     entries = [auto(f"N{i}", vendor="거래처Q") for i in range(50)] + [purchase("P1", date(2025, 5, 14)),
                                                                    purchase("P2", date(2025, 5, 16))]
@@ -274,3 +321,24 @@ def test_sample_answer_key_for_r4_r6():
     assert a09 in pair_ids                                                        # A09
     rent = set(df[df["line_amount"] == 15_000_000]["je_id"])
     assert not rent & ({a for a, _ in pair_ids} | {b for _, b in pair_ids})      # N03
+
+
+def test_sample_answer_key_review_groups():
+    """샘플 정답표: A03(운반비 월 급증, R2(b) 기간 결과로 보는 패턴)만 보조 목록이고, 나머지 비정상 패턴은 우선 검토 목록입니다.
+    매달 임차료(N03)는 결산일 전후인 1개를 빼고 보조 목록입니다."""
+    from auditlens.sample_data import generate_sample_journal
+    from auditlens.schema import suggest_mapping
+    from auditlens.validation import validate_journal
+
+    raw, key = generate_sample_journal()
+    df, _ = prepare(validate_journal(raw, suggest_mapping(raw.columns)).clean)
+    summary = run_detection(df, DetectionSettings(r5_threshold=50_000_000)).summary.set_index("전표번호")
+    ids = {r["시나리오"]: r["전표번호 전체"].split(", ") for r in key.to_dict("records")}
+    group = summary["검토 구분"]
+    for case in ["A01", "A02", "A04", "A05", "A06", "A07", "A08", "A09"]:
+        assert (group.loc[ids[case]] == PRIORITY_GROUP).all(), case
+    assert (group.loc[ids["A03"]] == SUPPORT_GROUP).all()
+    assert (group.loc[ids["N03"]] == SUPPORT_GROUP).sum() == 11
+    assert (group == PRIORITY_GROUP).sum() == 137 and (group == SUPPORT_GROUP).sum() == 570
+    order = summary.index.tolist()
+    assert order.index(ids["A06"][0]) < 30  # R4 조건 4개 전표가 1개 규칙 전표 중 앞쪽에 옴

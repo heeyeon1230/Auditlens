@@ -721,8 +721,13 @@ def r6_duplicates(df, settings=None):
 
 
 # ---------------------------------------------------------------- 종합
-SUMMARY_COLUMNS = ["전표번호", "판정", "해당 규칙 수", "해당 규칙", "회계처리일", "포함 계정", "전표 금액", "탐지 이유"]
+SUMMARY_COLUMNS = ["전표번호", "판정", "검토 구분", "해당 규칙 수", "해당 규칙", "해당 세부 조건 수", "해당 세부 조건",
+                   "회계처리일", "포함 계정", "전표 금액", "탐지 이유"]
 REASON_COLUMNS = ["전표번호", "규칙", "대상", "탐지 이유"]
+# 종합표의 검토 구분. 수기·조정 여부(R4(a))만 해당하는 전표는 보조 목록으로 나눕니다(오류·부정의 증거가 아님).
+PRIORITY_GROUP = "우선 검토"
+SUPPORT_GROUP = "보조 (수기·조정 여부만 해당)"
+R4_MANUAL_ID = "R4(a)"  # R4 (a) 수기·조정 전표
 
 
 @dataclass
@@ -751,39 +756,64 @@ class DetectionResult:
 
 
 def summarize(df, r1, r2a, r3, extra=()):
-    """전표 단위 종합표와 사유 표. 해당 규칙 수가 많은 순서로 정렬합니다.
+    """전표 단위 종합표와 사유 표.
+
+    수기·조정 여부(R4(a))만 해당하는 전표는 '검토 구분'을 보조 목록으로 두고 맨 뒤에 놓습니다. 나머지(우선 검토 목록)는
+    해당 규칙 수 → 해당 세부 조건 수가 많은 순서로 정렬합니다. 점수나 가중치는 만들지 않습니다.
 
     R2(b)는 계정-월(기간) 단위 판단이라 전표 종합표에 넣지 않습니다. 전표 금액은 그 전표의 차변 합계(원)입니다.
     반환값: (종합표, 사유 표). 사유 표에는 한 전표가 여러 규칙·여러 라인에서 탐지된 사유가 모두 한 행씩 들어갑니다.
     extra: R4~R6처럼 표 모양이 다른 규칙의 사유 목록. {"전표번호", "회계처리일", "규칙", "대상", "탐지 이유"} 사전들.
+           세부 조건이 있는 규칙(R4)은 "조건"에 '해당 조건' 항목 목록을 함께 넣습니다.
     """
     found, reason_rows = {}, []
+
+    def note_conditions(item, rule, conditions):
+        # 세부 조건: R3·R4는 '해당 조건'의 각 항목, 그 밖의 규칙은 규칙 하나를 조건 하나로 셉니다(라인이 여럿이어도 1개).
+        for c in conditions or [rule]:
+            name = rule + c.split(" ")[0] if conditions else rule  # 예: "(a-2) 매월 말일 전후" → "R3(a-2)"
+            if name not in item["conditions"]:
+                item["conditions"].append(name)
+
     for rule, table in [("R1", r1), ("R2(a)", r2a), ("R3", r3)]:
         for row in table.to_dict("records"):
-            item = found.setdefault(row["전표번호"], {"rules": [], "reasons": [], "date": row["회계처리일"]})
+            item = found.setdefault(row["전표번호"], {"rules": [], "reasons": [], "conditions": [],
+                                                    "date": row["회계처리일"]})
             if rule not in item["rules"]:
                 item["rules"].append(rule)
+            note_conditions(item, rule, row["해당 조건"].split(", ") if rule == "R3" else None)
             item["reasons"].append(f"[{rule}] {row['탐지 이유']}")
             target = (f"라인 {row['파일 행 번호']}행 · {row['계정코드']} {row['계정과목명']} {row['방향']}"
                       if rule != "R3" else f"전표 · {row['해당 조건']}")
             reason_rows.append({"전표번호": row["전표번호"], "규칙": rule, "대상": target, "탐지 이유": row["탐지 이유"]})
     for e in extra:
-        item = found.setdefault(e["전표번호"], {"rules": [], "reasons": [], "date": e["회계처리일"]})
+        item = found.setdefault(e["전표번호"], {"rules": [], "reasons": [], "conditions": [],
+                                              "date": e["회계처리일"]})
         if e["규칙"] not in item["rules"]:
             item["rules"].append(e["규칙"])
+        note_conditions(item, e["규칙"], e.get("조건"))
         item["reasons"].append(f"[{e['규칙']}] {e['탐지 이유']}")
         reason_rows.append({k: e[k] for k in REASON_COLUMNS})
     part = df[df["je_id"].isin(found)] if found else df.iloc[0:0]
     totals = part.groupby("je_id")["debit"].sum().to_dict()
     accounts = {je: ", ".join(dict.fromkeys(f"{c} {n}".strip() for c, n in zip(g["account_code"], g["account_name"])))
                 for je, g in part.groupby("je_id")}
-    rows = [{"전표번호": je, "판정": REVIEW_LABEL, "해당 규칙 수": len(v["rules"]), "해당 규칙": ", ".join(v["rules"]),
+
+    def group(v):
+        # 해당 세부 조건이 R4(a) 하나뿐이면 보조 목록, 그 밖에는 우선 검토 목록입니다.
+        return SUPPORT_GROUP if v["conditions"] == [R4_MANUAL_ID] else PRIORITY_GROUP
+
+    rows = [{"전표번호": je, "판정": REVIEW_LABEL, "검토 구분": group(v), "해당 규칙 수": len(v["rules"]),
+             "해당 규칙": ", ".join(v["rules"]), "해당 세부 조건 수": len(v["conditions"]),
+             "해당 세부 조건": ", ".join(v["conditions"]),
              "회계처리일": v["date"], "포함 계정": accounts.get(je, ""), "전표 금액": totals.get(je, 0.0),
              "탐지 이유": " ".join(v["reasons"])}
             for je, v in found.items()]
     table = pd.DataFrame(rows, columns=SUMMARY_COLUMNS)
-    table = table.sort_values(["해당 규칙 수", "회계처리일", "전표번호"], ascending=[False, True, True]) \
-        .reset_index(drop=True)
+    # 정렬: 우선 검토 목록 먼저 → 해당 규칙 수 → 해당 세부 조건 수(많은 순) → 회계처리일. 점수·가중치는 만들지 않습니다.
+    table["_support"] = table["검토 구분"].eq(SUPPORT_GROUP)
+    table = table.sort_values(["_support", "해당 규칙 수", "해당 세부 조건 수", "회계처리일", "전표번호"],
+                              ascending=[True, False, False, True, True]).drop(columns="_support").reset_index(drop=True)
     return table, pd.DataFrame(reason_rows, columns=REASON_COLUMNS)
 
 
@@ -807,7 +837,8 @@ def _extra_reasons(df, r4, r5, r6):
     out = []
     for row in r4.to_dict("records"):
         out.append({"전표번호": row["전표번호"], "회계처리일": row["회계처리일"], "규칙": "R4",
-                    "대상": f"전표 · {row['해당 조건']}", "탐지 이유": row["탐지 이유"]})
+                    "대상": f"전표 · {row['해당 조건']}", "탐지 이유": row["탐지 이유"],
+                    "조건": row["해당 조건"].split(", ")})
     for row in r5.to_dict("records"):
         target = f"{row['구분']} · {row['거래처']}" + (f" · {row['계정']}" if row["계정"] else "")
         for je in row["전표번호"].split(", "):

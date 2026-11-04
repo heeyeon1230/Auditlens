@@ -14,7 +14,7 @@ from auditlens.analysis import (
     unbalanced_vouchers, unverifiable_vouchers, voucher_lines,
 )
 from auditlens.detection import RULES, DetectionSettings, run_detection
-from auditlens.detection import PERIOD_LABEL
+from auditlens.detection import PERIOD_LABEL, PRIORITY_GROUP, SUPPORT_GROUP
 from auditlens.detection import REVIEW_LABEL as DETECTION_LABEL
 from auditlens.loader import LoadError, list_excel_sheets, read_uploaded_file
 from auditlens.sample_data import (
@@ -508,7 +508,10 @@ with st.container(border=True):
     st.subheader("5-1. 개별 거래 탐지 결과 (R1 · R2(a) · R3 · R4 · R5 · R6)")
     st.caption("전표나 분개 라인 하나하나에 대한 결과입니다. 판정: " + DETECTION_LABEL)
     m1, m2, m3, m4, m5, m6, m7 = st.columns(7)
-    m1.metric("종합 전표", f"{len(det.summary):,}")
+    priority = det.summary[det.summary["검토 구분"] == PRIORITY_GROUP]
+    support = det.summary[det.summary["검토 구분"] == SUPPORT_GROUP]
+    m1.metric("우선 검토 전표", f"{len(priority):,}",
+              help=f"종합 전표 {len(det.summary):,}개 중 수기·조정 여부만 해당하는 {len(support):,}개(보조 목록)를 뺀 수입니다.")
     m2.metric("R1 라인", f"{len(det.r1):,}")
     m3.metric("R2(a) 라인", f"{len(det.r2a):,}")
     m4.metric("R3 전표", f"{len(det.r3):,}")
@@ -520,16 +523,28 @@ with st.container(border=True):
         ["종합 (전표별)", "R1 금액 분포", "R2(a) 거래처 이전 거래", "R3 시점", "R4 수기·조정", "R5 신규 거래처", "R6 중복 가능"])
 
     with tab_sum:
-        st.caption("종합은 규칙별 결과를 전표 단위로 모은 표입니다. 한 전표가 여러 규칙에 해당하면 규칙을 모두 적고, "
-                   "해당 규칙 수가 많은 순서로 보여 줍니다. 점수나 위험도 등급은 매기지 않습니다. "
+        st.caption("종합은 규칙별 결과를 전표 단위로 모은 표입니다. 한 전표가 여러 규칙에 해당하면 규칙과 세부 조건을 모두 "
+                   "적고, 해당 규칙 수 → 해당 세부 조건 수가 많은 순서로 보여 줍니다. 점수나 위험도 등급은 매기지 않습니다. "
                    "규칙별 원래 결과는 옆의 규칙 탭에 있고, R2(b)는 아래 5-2에 따로 있습니다.")
+        st.caption("수기·조정 전표라는 사실만으로는 오류나 부정을 뜻하지 않습니다. 그래서 R4(a) 수기·조정 여부 하나만 해당하는 "
+                   "전표는 아래 보조 목록으로 나누고, 다른 규칙이나 R4의 다른 조건과 함께 나타난 전표를 우선 검토 목록에 "
+                   "두었습니다. 보조 목록도 R4 검토 대상 거래에 그대로 포함됩니다.")
         if det.summary.empty:
-            st.success("현재 기준으로 R1·R2(a)·R3에 해당하는 전표가 없습니다. 탐지되지 않았다고 문제가 없다는 뜻은 아닙니다.")
+            st.success("현재 기준으로 R1~R6에 해당하는 전표가 없습니다. 탐지되지 않았다고 문제가 없다는 뜻은 아닙니다.")
         else:
-            show_table(det.summary, ["전표 금액"], key="det_summary")
+            st.markdown(f"**우선 검토 목록** · {len(priority):,}개 전표")
+            if priority.empty:
+                st.info("다른 규칙이나 조건과 함께 나타난 전표가 없습니다. 보조 목록만 있습니다.")
+            else:
+                show_table(priority, ["전표 금액"], key="det_summary")
+            with st.expander(f"보조 목록: 수기·조정 여부(R4(a))만 해당하는 전표 {len(support):,}개"):
+                st.caption("다른 탐지 규칙과 R4의 다른 조건 (b)~(d)에는 해당하지 않은 전표입니다. 수기 분개를 검토 모집단으로 "
+                           "보려면 이 목록을 함께 확인해 주세요.")
+                show_table(support, ["전표 금액"], key="det_summary_support")
             pick = st.selectbox("상세를 볼 전표", det.summary["전표번호"], key="det_pick")
             row = det.summary.set_index("전표번호").loc[pick]
-            st.markdown(f"**{pick}** · 해당 규칙 {row['해당 규칙 수']}개 ({row['해당 규칙']}) · {DETECTION_LABEL}")
+            st.markdown(f"**{pick}** · {row['검토 구분']} · 해당 규칙 {row['해당 규칙 수']}개 ({row['해당 규칙']}) · "
+                        f"세부 조건 {row['해당 세부 조건 수']}개 ({row['해당 세부 조건']}) · {DETECTION_LABEL}")
             st.dataframe(det.reasons[det.reasons["전표번호"] == pick].drop(columns="전표번호"), hide_index=True,
                          use_container_width=True, column_config={"탐지 이유": st.column_config.TextColumn(width="large")})
             st.caption("규칙별·라인별 탐지 사유를 모두 한 행씩 보여 줍니다. 아래는 이 전표의 전체 라인입니다.")
@@ -599,6 +614,13 @@ with st.container(border=True):
             conditions = ["전체"] + sorted({c for v in det.r4["해당 조건"] for c in v.split(", ")})
             cond = st.radio("조건별 보기", conditions, horizontal=True, key="det_r4_cond")
             table = det.r4 if cond == "전체" else det.r4[det.r4["해당 조건"].str.contains(cond, regex=False)]
+            only_manual = set(support["전표번호"])
+            n_only = int(det.r4["전표번호"].isin(only_manual).sum())
+            combos = {"전체": None, f"(a)만 해당 ({n_only:,}개, 종합의 보조 목록)": True,
+                      f"다른 조건·규칙과 함께 ({len(det.r4) - n_only:,}개, 종합의 우선 검토 목록)": False}
+            combo = st.radio("다른 조건과의 결합", list(combos), horizontal=True, key="det_r4_combo")
+            if combos[combo] is not None:
+                table = table[table["전표번호"].isin(only_manual) == combos[combo]]
             st.caption(f"{len(table):,}개 전표")
             show_table(table, ["전표 금액"], key="det_r4")
 

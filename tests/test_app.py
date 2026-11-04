@@ -123,6 +123,9 @@ def test_검토_대상_거래_화면이_표시됨():
     summary = at.dataframe[[i for i, d in enumerate(at.dataframe) if "해당 규칙 수" in d.value.columns][0]].value
     assert (summary["판정"] == "검토 대상 거래").all()
     assert summary["해당 규칙 수"].is_monotonic_decreasing
+    assert (summary["검토 구분"] == "우선 검토").all()  # 첫 종합표는 우선 검토 목록
+    assert any(e.label.startswith("보조 목록: 수기·조정 여부(R4(a))만 해당하는 전표") for e in at.expander)
+    assert int(metrics["우선 검토 전표"].replace(",", "")) == len(summary)
 
 
 def test_탐지_기준을_바꾸면_다시_계산됨():
