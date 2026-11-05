@@ -236,6 +236,16 @@ def validate_journal(raw: pd.DataFrame, mapping: dict, single_amount: dict = Non
         for i, text in zip(indices, texts):
             reasons.setdefault(i, []).append(text)
 
+    # V5 모든 칸이 빈 행(파일 끝의 빈 줄 등). 다른 경고(필수 값 결측·중복 행)에 여러 번 세지 않고 한 번만 알린 뒤 제외합니다.
+    empty_rows = set(raw.index[raw.apply(lambda col: col.map(_is_blank)).all(axis=1)]) if len(raw.columns) else set()
+    if empty_rows:
+        rows = sorted(empty_rows)
+        exclude(rows, ["모든 칸이 빈 행"] * len(rows))
+        _add(result, WARNING, "V5", "행 전체",
+             f"모든 칸이 비어 있는 행이 {len(rows)}개 있습니다.",
+             "파일 끝이나 중간에 들어간 빈 줄로 보입니다. 이 행들은 분석에서 제외됩니다. 값이 지워진 행이라면 원본 자료를 "
+             "확인해 주세요.", rows, _examples(rows))
+
     # 금액 한 열 형식: 구분값이 가리키는 쪽에 금액(파일 값 그대로)을 옮겨 차변금액·대변금액 두 열을 만듭니다.
     # 금액을 숫자로 읽는 일과 그 뒤의 검사(V4~V8)는 두 열 형식과 똑같이 진행합니다.
     if single:
@@ -245,14 +255,14 @@ def validate_journal(raw: pd.DataFrame, mapping: dict, single_amount: dict = Non
         work["debit"] = [a if s == DEBIT_SIDE else "" for a, s in zip(amounts, side)]
         work["credit"] = [a if s == CREDIT_SIDE else "" for a, s in zip(amounts, side)]
         work = work[[c for c in COLUMN_LABELS if c in work]].copy()  # 열 순서를 두 열 형식과 같게(표준 열 순서)
-        blank_idx = [i for i, k in keys.items() if k == ""]
+        blank_idx = [i for i, k in keys.items() if k == "" and i not in empty_rows]
         if blank_idx:
             exclude(blank_idx, ["차대 구분 없음"] * len(blank_idx))
             _add(result, WARNING, "V12", f"차대 구분({single_amount['dc_flag']})",
                  f"차대 구분 값이 비어 있는 행이 {len(blank_idx)}개 있습니다.",
                  "해당 행에 차변·대변 구분을 채워 주세요. 이 행들은 차변인지 대변인지 알 수 없어 분석에서 제외됩니다.",
                  blank_idx, _examples(blank_idx))
-        unknown_idx = [i for i, k in keys.items() if k != "" and pd.isna(side[i])]
+        unknown_idx = [i for i, k in keys.items() if k != "" and pd.isna(side[i]) and i not in empty_rows]
         if unknown_idx:
             values = [keys[i] for i in unknown_idx]
             exclude(unknown_idx, [f"차대 구분 값 '{v}'을(를) 차변·대변으로 지정하지 않음" for v in values])
@@ -265,14 +275,14 @@ def validate_journal(raw: pd.DataFrame, mapping: dict, single_amount: dict = Non
 
     # V5 필수 값 결측 (전표번호, 회계처리일, 계정코드는 없으면 분석에서 제외)
     for col in ["je_id", "posting_date", "account_code"]:
-        blank_idx = [i for i, v in work[col].items() if _is_blank(v)]
+        blank_idx = [i for i, v in work[col].items() if _is_blank(v) and i not in empty_rows]
         if blank_idx:
             exclude(blank_idx, [f"{COLUMN_LABELS[col]} 없음"] * len(blank_idx))
             _add(result, WARNING, "V5", _label(col),
                  f"'{COLUMN_LABELS[col]}' 값이 비어 있는 행이 {len(blank_idx)}개 있습니다.",
                  f"해당 행에 '{COLUMN_LABELS[col]}'을(를) 채워 주세요. 이 행들은 분석에서 제외됩니다.",
                  blank_idx, _examples(blank_idx))
-    blank_names = [i for i, v in work["account_name"].items() if _is_blank(v)]
+    blank_names = [i for i, v in work["account_name"].items() if _is_blank(v) and i not in empty_rows]
     if blank_names:
         _add(result, WARNING, "V5", _label("account_name"),
              f"계정과목명이 비어 있는 행이 {len(blank_names)}개 있습니다.",
@@ -431,7 +441,7 @@ def validate_journal(raw: pd.DataFrame, mapping: dict, single_amount: dict = Non
     )
 
     # V9 완전히 같은 행 (원본 파일의 모든 열 기준)
-    dup_mask = raw.astype(str).duplicated(keep="first")
+    dup_mask = raw.astype(str).duplicated(keep="first") & ~raw.index.isin(list(empty_rows))  # 빈 행은 위 V5에서 따로 알림
     dup_idx = list(raw.index[dup_mask])
     if dup_idx:
         _add(result, WARNING, "V9", "행 전체",
@@ -481,6 +491,12 @@ def validate_journal(raw: pd.DataFrame, mapping: dict, single_amount: dict = Non
         variants = clean.loc[clean["account_code"] == code, "account_name"].dropna().unique()
         _add(result, WARNING, "V11", f"계정코드 {code}",
              f"계정코드 {code}에 계정과목명이 {len(variants)}개 있습니다: {', '.join(map(str, variants))}",
+             "계정과목명 표기를 하나로 통일해 주세요. 분석은 계정코드 기준으로 진행됩니다.")
+    rest = list(conflicted.index[MAX_EXAMPLES:])
+    if rest:
+        shown = ", ".join(map(str, rest[:20])) + (f" 외 {len(rest) - 20}개" if len(rest) > 20 else "")
+        _add(result, WARNING, "V11", "계정코드 (추가)",
+             f"위 {MAX_EXAMPLES}개 말고도 계정과목명이 여러 개인 계정코드가 {len(rest)}개 더 있습니다: {shown}",
              "계정과목명 표기를 하나로 통일해 주세요. 분석은 계정코드 기준으로 진행됩니다.")
 
     # V10 분석 기간과 합계 (정보)

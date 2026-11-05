@@ -192,3 +192,37 @@ def test_원본_데이터는_바뀌지_않음():
     before = df.copy()
     run(df)
     pd.testing.assert_frame_equal(df, before)
+
+
+# ---------------------------------------------------------------- 5단계: 빈 행, 계정명 불일치가 많은 경우
+def test_모든_칸이_빈_행은_한_번만_알리고_제외():
+    rows = ok_rows() + [["", "", "", "", "", ""], [None, None, None, None, None, None]]
+    result = run(make(rows))
+    blank = [i for i in result.issues if i["코드"] == "V5" and i["항목"] == "행 전체"]
+    assert len(blank) == 1 and blank[0]["등급"] == WARNING and blank[0]["해당 행 수"] == 2
+    assert blank[0]["행 번호(예시)"] == "6행, 7행"
+    # 같은 빈 행을 필수 값 결측(V5 각 열)이나 중복 행(V9)으로 다시 세지 않음
+    assert [i["항목"] for i in result.issues if i["코드"] == "V5"] == ["행 전체"]
+    assert "V9" not in codes(result, WARNING)
+    assert result.excluded_rows == [6, 7] and result.summary["분석 대상 행"] == 4
+    assert list(result.excluded_detail["사유"]) == ["모든 칸이 빈 행", "모든 칸이 빈 행"]
+
+
+def test_일부_칸만_빈_행은_기존처럼_필수_값_결측으로_알림():
+    rows = [r + [""] for r in ok_rows()] + [["", "", "", "", "", "", "메모만 있음"]]
+    result = run(make(rows, COLUMNS + ["적요"]))
+    assert "행 전체" not in [i["항목"] for i in result.issues]
+    assert {"전표번호(je_id)", "회계처리일(posting_date)", "계정코드(account_code)"} <= \
+        {i["항목"] for i in result.issues if i["코드"] == "V5"}
+
+
+def test_V11_계정코드가_5개를_넘으면_나머지_수와_코드를_알림():
+    rows = []
+    for n in range(7):
+        code = str(800 + n)
+        rows += [[f"J{n}a", "2025-01-02", code, "이름A", "10", ""], [f"J{n}a", "2025-01-02", "103", "보통예금", "", "10"],
+                 [f"J{n}b", "2025-01-03", code, "이름B", "10", ""], [f"J{n}b", "2025-01-03", "103", "보통예금", "", "10"]]
+    result = run(make(rows))
+    v11 = [i for i in result.issues if i["코드"] == "V11"]
+    assert len(v11) == 6  # 계정코드별 5개 + 나머지 안내 1개
+    assert "2개 더 있습니다: 805, 806" in v11[-1]["문제"]
