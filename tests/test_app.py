@@ -223,3 +223,16 @@ def test_R2b를_끄면_5_2에_꺼짐_표시():
     assert not at.exception
     assert {m.label: m.value for m in at.metric}["검토 대상 기간 (계정-월)"] == "꺼짐"
     assert any("R2(b) 규칙이 꺼져 있습니다" in w.value for w in at.warning)
+
+
+def test_결과_다운로드_구역과_버튼():
+    at = AppTest.from_file(APP, default_timeout=180).run()
+    assert not at.exception
+    assert any(h.value == "6. 결과 다운로드" for h in at.header)
+    buttons = at.get("download_button")
+    labels = [b.proto.label for b in buttons]
+    assert "Excel 파일 내려받기 (.xlsx)" in labels and "CSV 묶음 내려받기 (.zip)" in labels
+    sidebar = " ".join(c.value for c in at.sidebar.caption)
+    assert "다음 개발 단위" not in sidebar and "6. 결과 다운로드" in sidebar
+    sheets = [d.value for d in at.dataframe if "Excel 시트" in d.value.columns][0]
+    assert sheets["Excel 시트"].iloc[0] == "안내"
