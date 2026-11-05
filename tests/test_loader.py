@@ -56,3 +56,33 @@ def test_Excel_시트_선택():
 def test_읽을_수_없는_파일은_안내_메시지(name, data, message):
     with pytest.raises(LoadError, match=message):
         read_uploaded_file(name, data)
+
+
+# ---------------------------------------------------------------- 5단계: 열 이름 겹침, 구분 기호
+def test_앞뒤_공백만_다른_같은_이름의_열은_번호를_붙여_구분():
+    df, info = read_uploaded_file("a.csv", _csv("전표번호,적요,적요 \nJ1,가,나\n"))
+    assert list(df.columns) == ["전표번호", "적요", "적요.1"]
+    assert info["renamed"] == [("적요", "적요.1")]
+    assert df.loc[0, "적요.1"] == "나"  # 값은 그대로
+
+
+def test_번호를_붙일_때_파일에_있는_이름과_겹치지_않음():
+    df, info = read_uploaded_file("a.csv", _csv("적요,적요 ,적요.1\n가,나,다\n"))
+    assert list(df.columns) == ["적요", "적요.2", "적요.1"]
+
+
+def test_열_이름이_겹치지_않으면_바꾸지_않음():
+    _, info = read_uploaded_file("a.csv", _csv("전표번호,적요\nJ1,가\n"))
+    assert "renamed" not in info
+
+
+@pytest.mark.parametrize("sep, name", [(";", "세미콜론"), ("\t", "탭")])
+def test_쉼표가_아닌_구분_기호로_저장한_CSV는_안내(sep, name):
+    text = sep.join(["전표번호", "회계처리일", "계정코드"]) + "\n" + sep.join(["J1", "2025-01-01", "101"]) + "\n"
+    with pytest.raises(LoadError, match=name):
+        read_uploaded_file("a.csv", _csv(text))
+
+
+def test_열이_하나뿐인_정상_CSV는_그대로_읽음():
+    df, _ = read_uploaded_file("a.csv", _csv("전표번호\nJ1\n"))
+    assert list(df.columns) == ["전표번호"]

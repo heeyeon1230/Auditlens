@@ -359,3 +359,56 @@ def test_적요가_모두_비면_R4d_평가_불가_안내():
     counts = [d.value for d in at.dataframe if "적용 여부" in d.value.columns][0].set_index("조건")
     assert counts.loc["(d) 적요 없음·키워드", "적용 여부"] == "평가 불가 (적요 열의 값이 모두 비어 있음)"
     assert counts.loc["(d) 적요 없음·키워드", "해당 전표 수"] == 0
+
+
+# ---------------------------------------------------------------- 5단계: 오류 수정·사용성
+def test_화면_코드에_곧_없어질_use_container_width를_쓰지_않음():
+    # Streamlit이 2025-12-31 이후 없앤다고 안내한 인수입니다. 새 버전을 설치해도 화면이 멈추지 않게 width를 씁니다.
+    assert "use_container_width" not in Path(APP).read_text(encoding="utf-8")
+
+
+def test_앞뒤_공백만_다른_같은_이름의_열이_있어도_화면이_멈추지_않음():
+    data = ("전표번호,회계처리일,계정코드,계정과목명,차변금액,대변금액,적요,적요 \n"
+            "J1,2025-01-02,830,소모품비,1000,,가,나\nJ1,2025-01-02,103,보통예금,,1000,가,나\n").encode("utf-8")
+    at = _upload(AppTest.from_file(APP, default_timeout=180).run(), "dup.csv", data)
+    assert not at.exception
+    assert any("'적요' → '적요.1'" in i.value for i in at.info)
+    assert any(h.value == "6. 결과 다운로드" for h in at.header)
+
+
+def test_첫_행이_열_이름이_아니면_안내():
+    data = "가상회사 분개장,,\n전표번호,회계처리일,계정코드\nJ1,2025-01-02,830\n".encode("utf-8")
+    at = _upload(AppTest.from_file(APP, default_timeout=120).run(), "title.csv", data)
+    assert not at.exception
+    assert any("첫 행이 열 이름이" in w.value for w in at.warning)
+
+
+def test_제외한_행의_사유를_표로_보여_줌():
+    data = ("전표번호,회계처리일,계정코드,계정과목명,차변금액,대변금액\n"
+            "J1,2025-01-02,830,소모품비,1000,\nJ1,2025-01-02,103,보통예금,,1000\n"
+            "J2,2025-13-01,830,소모품비,500,\nJ2,2025-01-03,103,보통예금,,500\n,,,,,\n").encode("utf-8")
+    at = _upload(AppTest.from_file(APP, default_timeout=180).run(), "excluded.csv", data)
+    assert not at.exception
+    table = [d.value for d in at.dataframe if "제외 사유" in d.value.columns and "계정코드" in d.value.columns][0]
+    assert list(table["파일 행 번호"]) == [4, 6]
+    assert "회계처리일 형식 오류" in table["제외 사유"].iloc[0] and table["제외 사유"].iloc[1] == "모든 칸이 빈 행"
+
+
+def _space_code_csv():
+    """계정코드에 공백이 든 가상 분개장. '110 01' 계정의 2025-06 라인 수가 다른 달보다 크게 많습니다(R2(b))."""
+    lines = ["전표번호,회계처리일,계정코드,계정과목명,차변금액,대변금액"]
+    n = 0
+    for ym in pd.period_range("2024-01", "2025-12", freq="M"):
+        for k in range(12 if str(ym) == "2025-06" else 2):
+            n += 1
+            day = f"{ym.year}-{ym.month:02d}-{10 + k % 10:02d}"
+            lines += [f"S{n},{day},110 01,가상미수금,{1000 + k},", f"S{n},{day},401,가상매출,,{1000 + k}"]
+    return "\n".join(lines).encode("utf-8")
+
+
+def test_R2b_기간_선택은_공백이_든_계정코드도_그_계정의_라인을_보여_줌():
+    at = _upload(AppTest.from_file(APP, default_timeout=180).run(), "space.csv", _space_code_csv())
+    assert not at.exception
+    at.selectbox(key="det_r2b_pick").set_value("110 01 가상미수금 · 2025-06").run()
+    assert not at.exception
+    assert any("2025-06 110 01 라인 12건" in c.value for c in at.caption)

@@ -18,8 +18,8 @@ from auditlens.detection import RULE_SWITCHES, RULES, DetectionSettings, descrip
 from auditlens.detection import PERIOD_LABEL, PRIORITY_GROUP, SUPPORT_GROUP, SUPPORT_LABEL, period_vouchers
 from auditlens.detection import REVIEW_LABEL as DETECTION_LABEL
 from auditlens.export import (
-    COMMON_LIMITS, MISS_NOTICE, REVIEW_NOTICE, SHEETS, build_tables, export_file_name, now_kst, to_csv_zip_bytes,
-    to_excel_bytes,
+    COMMON_LIMITS, MISS_NOTICE, REVIEW_NOTICE, SHEETS, build_tables, csv_safe, export_file_name, now_kst,
+    to_csv_zip_bytes, to_excel_bytes,
 )
 from auditlens.formats import DAY_ORDERS, NOTATION_STANDARD, NOTATIONS, count_ambiguous_dates, is_ambiguous_date
 from auditlens.loader import LoadError, list_excel_sheets, read_uploaded_file
@@ -95,7 +95,7 @@ if mode == "가상 샘플 데이터로 체험":
     with st.expander("테스트 정답표 보기 (의도적으로 넣은 패턴 목록)"):
         st.caption("탐지 규칙이 제대로 작동하는지 확인하려고 넣은 테스트용 장치입니다. "
                    "실제 부정이나 회계 오류를 뜻하지 않습니다.")
-        st.dataframe(answer_key.drop(columns=["전표번호 전체"]), hide_index=True, use_container_width=True)
+        st.dataframe(answer_key.drop(columns=["전표번호 전체"]), hide_index=True, width="stretch")
     file_name, data = SAMPLE_FILE_NAME, csv_bytes
 else:
     uploaded = st.file_uploader("분개장 파일 (CSV 또는 Excel .xlsx)", type=["csv", "xlsx", "xlsm", "xls"])
@@ -131,8 +131,12 @@ if info.get("encoding"):
 if info.get("sheet"):
     detail += f", 시트 '{info['sheet']}'"
 st.success(f"파일을 읽었습니다: {file_name} ({detail}) · {len(raw):,}행 × {len(raw.columns)}열")
+if info.get("renamed"):
+    st.info("이름이 같은 열이 있어 뒤의 열 이름에 번호를 붙였습니다(값은 그대로): "
+            + ", ".join(f"'{old}' → '{new}'" for old, new in info["renamed"])
+            + ". 열 연결에서 어느 열을 쓸지 확인해 주세요.")
 with st.expander("원본 미리보기 (처음 20행)"):
-    st.dataframe(raw.head(20), use_container_width=True)
+    st.dataframe(raw.head(20), width="stretch")
 
 # ---------------------------------------------------------------- 2. 열 연결
 st.header("2. 열 연결")
@@ -140,6 +144,10 @@ st.write("파일의 열이 어떤 항목인지 연결합니다. 열 이름을 �
          "**\\*** 표시는 필수 항목입니다.")
 suggested = suggest_mapping(raw.columns)
 options = [NOT_SELECTED] + list(raw.columns)
+if not any(suggested[c] for c in REQUIRED_COLUMNS) and any(str(c).startswith("Unnamed:") for c in raw.columns):
+    st.warning("필수 항목에 맞는 열 이름을 하나도 찾지 못했고, 이름이 없는 열('Unnamed: …')이 있습니다. 파일의 첫 행이 열 이름이 "
+               "아니라 제목·회사명·기간 같은 다른 내용일 수 있습니다. 위 '원본 미리보기'에서 확인하고, 열 이름이 첫 행에 오도록 그 "
+               "위의 행을 지운 뒤 다시 저장해 올려 주세요.")
 # 금액 형식: 기본은 차변·대변 두 열입니다. 차변·대변 열을 찾지 못했고 금액·차대 구분 열 이름이 보일 때만 한 열 형식을 먼저 고릅니다.
 single_guess = suggest_single_amount(raw.columns, [v for v in suggested.values() if v])
 guess_one = not (suggested["debit"] and suggested["credit"]) and all(single_guess.values())
@@ -251,7 +259,7 @@ for item in table.to_dict("records"):
         lines.append(f"해당 행: {item['행 번호(예시)']}")
     lines.append(f"수정 방법: {item['수정 방법']}")
     show[item["등급"]]("  \n".join(lines))
-st.download_button("검증 결과 CSV 내려받기", table.to_csv(index=False).encode("utf-8-sig"),
+st.download_button("검증 결과 CSV 내려받기", csv_safe(table).to_csv(index=False).encode("utf-8-sig"),
                    "검증결과.csv", "text/csv")
 
 with st.expander("검증 항목 설명"):
@@ -276,14 +284,20 @@ with st.expander("검증 항목 설명"):
     )
 
 if result.excluded_rows:
-    with st.expander(f"분석에서 제외한 행 번호 ({len(result.excluded_rows)}개)"):
-        st.write(", ".join(map(str, result.excluded_rows)))
+    with st.expander(f"분석에서 제외한 행과 사유 ({len(result.excluded_rows)}개)"):
+        if result.excluded_detail is not None and len(result.excluded_detail):
+            st.dataframe(result.excluded_detail.rename(columns={**COLUMN_LABELS, "file_row": "파일 행 번호", "사유": "제외 사유"}),
+                         hide_index=True, width="stretch",
+                         column_config={"제외 사유": st.column_config.TextColumn(width="large")})
+            st.caption("파일 행 번호는 올린 파일에서의 행 번호(머리글이 1행)입니다. 이 행들은 기초 분석과 탐지에 들어가지 않습니다.")
+        else:
+            st.write(", ".join(map(str, result.excluded_rows)))
 
 if result.clean is not None:
     st.session_state["validated_journal"] = result.clean
     with st.expander("검증 후 분석용 데이터 미리보기 (처음 100행)"):
         preview = result.clean.head(100).rename(columns={**COLUMN_LABELS, "file_row": "파일 행 번호"})
-        st.dataframe(preview, hide_index=True, use_container_width=True)
+        st.dataframe(preview, hide_index=True, width="stretch")
 
 # 결산월·결산일은 기초 분석(회계연도)과 탐지(R3·R4(c))가 함께 씁니다. 기초 분석보다 먼저 읽어야 하므로 여기서 그립니다.
 # 입력칸 이름표(key)는 그대로라 '기본값으로 되돌리기'와 탐지 기준 변경 표시에 계속 포함됩니다.
@@ -341,7 +355,7 @@ def show_voucher_lines(je_id, excluded):
     shown = with_won(date_only(lines), ["차변", "대변"])
     for col in ["차변 (원)", "대변 (원)"]:  # 제외된 행은 금액을 읽지 못했을 수 있으므로 빈칸
         shown[col] = [f"{v:,.0f}" if pd.notna(v) else "" for v in shown[col]]
-    st.dataframe(shown, hide_index=True, use_container_width=True,
+    st.dataframe(shown, hide_index=True, width="stretch",
                  column_config={"제외 사유": st.column_config.TextColumn(width="large")})
     kept = lines[lines["구분"] == "분석 포함"]
     st.caption(f"분석 포함 행 합계: 차변 {kept['차변'].sum():,.0f}원 · 대변 {kept['대변'].sum():,.0f}원 · "
@@ -395,7 +409,7 @@ with tab_overview:
                      "아니라 증빙과 대조해 검토가 필요한 전표입니다.")
             table = unbalanced_vouchers(df, excluded)
             st.dataframe(money(date_only(table), ["차변 합계", "대변 합계", "차이"]), hide_index=True,
-                         use_container_width=True,
+                         width="stretch",
                          column_config={"포함 계정": st.column_config.TextColumn(width="large")})
             pick = st.selectbox("라인 상세를 볼 불균형 전표", table["전표번호"], key="unbalanced_pick")
             show_voucher_lines(pick, excluded)
@@ -408,7 +422,7 @@ with tab_overview:
                        "확인할 수 있습니다.", icon="🔍")
             table = unverifiable_vouchers(df, excluded)
             st.dataframe(money(date_only(table), ["차변 합계", "대변 합계", "차이"]), hide_index=True,
-                         use_container_width=True,
+                         width="stretch",
                          column_config={"제외 사유": st.column_config.TextColumn(width="large")})
             st.caption("라인 수·금액·차이는 분석에 남은 행만으로 계산한 값입니다.")
             pick = st.selectbox("라인 상세를 볼 검증 불가 전표", table["전표번호"], key="unverifiable_pick")
@@ -436,7 +450,7 @@ with tab_account:
     top = top_accounts(df, top_measure, top_n)
     top_money = ["차변 합계", "대변 합계", "라인 금액 합계"]
     st.dataframe(money(top[["계정코드", "계정과목명", "라인 수", "전표 수", *top_money, "금액 비중(%)"]], top_money)
-                 .format("{:,.2f}", subset=["금액 비중(%)"], na_rep=""), hide_index=True, use_container_width=True)
+                 .format("{:,.2f}", subset=["금액 비중(%)"], na_rep=""), hide_index=True, width="stretch")
     # 차트 축은 글자 순서로 정렬되므로 순위 번호를 앞에 붙여 표와 같은 순서로 보이게 합니다.
     chart = top.assign(계정=[f"{i:02d}. {c} {n}" for i, (c, n) in enumerate(zip(top["계정코드"], top["계정과목명"]), 1)])
     chart = chart.set_index("계정")
@@ -468,9 +482,9 @@ with tab_account:
                "계정과목명이 여러 개로 적힌 계정은 가장 많이 쓰인 이름 뒤에 '외 n개'를 붙였습니다.")
     money_cols = ["차변 합계", "대변 합계", "순액(차변-대변)", "라인 금액 합계", "라인 금액 평균", "라인 금액 중앙값",
                   "라인 금액 최소", "라인 금액 최대"]
-    st.dataframe(money(accounts, money_cols), hide_index=True, use_container_width=True)
+    st.dataframe(money(accounts, money_cols), hide_index=True, width="stretch")
     st.download_button("계정별 분석 CSV 내려받기",
-                       with_won(accounts, money_cols).to_csv(index=False).encode("utf-8-sig"),
+                       csv_safe(with_won(accounts, money_cols)).to_csv(index=False).encode("utf-8-sig"),
                        "계정별분석.csv", "text/csv")
 
 with tab_month:
@@ -479,14 +493,14 @@ with tab_month:
     st.line_chart(to_chart_unit(monthly.set_index("연월"), ["차변 합계", "대변 합계"]),
                   x_label="연월", y_label=f"금액 ({CHART_UNIT_LABEL})")
     st.bar_chart(monthly.set_index("연월")[["전표 수"]], x_label="연월", y_label="전표 수 (건)")
-    st.dataframe(money(monthly, ["차변 합계", "대변 합계"]), hide_index=True, use_container_width=True)
+    st.dataframe(money(monthly, ["차변 합계", "대변 합계"]), hide_index=True, width="stretch")
     st.caption("차변 합계와 대변 합계가 같은 달은 두 선이 겹쳐 하나로 보입니다. 거래가 없는 달도 0으로 표시합니다(비고: 거래 없음). 전표 수는 그 달에 라인이 있는 전표번호 수이며, "
                "여러 달에 걸친 전표는 각 달에 한 번씩 셉니다.")
 
     st.subheader("회계연도별 요약")
     fy_table = fiscal_year_summary(df)
     st.dataframe(money(date_only(date_only(fy_table, "자료 시작일"), "자료 종료일"), ["차변 합계", "대변 합계"]),
-                 hide_index=True, use_container_width=True)
+                 hide_index=True, width="stretch")
     st.caption(f"{int(closing_month)}월 결산 기준입니다. 자료가 12개월에 못 미치는 회계연도는 비고에 적었으니, 연도 합계를 "
                "그대로 비교하지 마세요. 전표 수는 그 회계연도에 라인이 있는 전표번호 수입니다.")
 
@@ -522,7 +536,7 @@ with tab_month:
                                       "증감": f"증감 ({unit})"})
         st.dataframe(shown.style.format("{:,.0f}", subset=list(shown.columns[1:4]))
                      .format("{:,.1f}", subset=["증감률(%)"], na_rep=""),
-                     hide_index=True, use_container_width=True)
+                     hide_index=True, width="stretch")
         st.caption(f"회계연도의 같은 달끼리 비교합니다({fy_first}월부터 {fy_last}월 순서). 증감 = 당기 - 전기, 증감률 = 증감 ÷ 전기 × 100. 전기 값이 0이면 증감률은 "
                    "빈칸입니다. '자료 없음'은 그 해 그 달에 어떤 계정의 자료도 없다는 뜻으로, 거래가 0인 것과 "
                    "구분해서 봐야 합니다.")
@@ -564,7 +578,7 @@ with st.sidebar:
     st.header("탐지 기준 설정")
     st.caption("기본값은 설계서 6절과 이전 단계에서 확정한 값입니다. 값을 바꾸면 결과를 바로 다시 계산합니다.")
     status_box = st.container()
-    st.button("기본값으로 되돌리기", on_click=reset_detection_settings, key="det_reset", use_container_width=True)
+    st.button("기본값으로 되돌리기", on_click=reset_detection_settings, key="det_reset", width="stretch")
 
     with st.expander("R1 금액 분포"):
         on = {"R1": rule_switch(st, "R1")}
@@ -665,7 +679,7 @@ def show_table(table, money_cols, date_cols=("회계처리일",), key=None):
     styled = money(shown, money_cols)
     if "중앙값 대비 배수" in shown:
         styled = styled.format("{:,.2f}", subset=["중앙값 대비 배수"])
-    st.dataframe(styled, hide_index=True, use_container_width=True,
+    st.dataframe(styled, hide_index=True, width="stretch",
                  column_config={"탐지 이유": st.column_config.TextColumn(width="large"),
                                 "제외 사유": st.column_config.TextColumn(width="large")}, key=key)
 
@@ -714,7 +728,7 @@ with st.container(border=True):
             st.markdown(f"**{pick}** · {row['검토 구분']} · 해당 규칙 {row['해당 규칙 수']}개 ({row['해당 규칙']}) · "
                         f"세부 조건 {row['해당 세부 조건 수']}개 ({row['해당 세부 조건']}) · {row['판정']}")
             st.dataframe(det.reasons[det.reasons["전표번호"] == pick].drop(columns="전표번호"), hide_index=True,
-                         use_container_width=True, column_config={"탐지 이유": st.column_config.TextColumn(width="large")})
+                         width="stretch", column_config={"탐지 이유": st.column_config.TextColumn(width="large")})
             st.caption("규칙별·라인별 탐지 사유를 모두 한 행씩 보여 줍니다. 아래는 이 전표의 전체 라인입니다.")
             show_voucher_lines(pick, result.excluded_detail)
 
@@ -731,12 +745,12 @@ with st.container(border=True):
                     show_table(det.r1_excluded, ["금액"], key="det_r1_excluded")
             if len(det.r1_skipped):
                 with st.expander(f"검사하지 않은 계정·방향 {len(det.r1_skipped)}개 (라인 수 부족)"):
-                    st.dataframe(det.r1_skipped, hide_index=True, use_container_width=True)
+                    st.dataframe(det.r1_skipped, hide_index=True, width="stretch")
 
     with tab_r2a:
         if rule_box("R2(a)"):
             st.markdown("**처리 현황**: 모든 라인이 아래 구분 중 하나에 들어갑니다.")
-            st.dataframe(det.r2a_status, hide_index=True, use_container_width=True,
+            st.dataframe(det.r2a_status, hide_index=True, width="stretch",
                          column_config={"설명": st.column_config.TextColumn(width="large")})
             st.caption(f"적용 방법: 같은 거래처·계정·방향에서 회계처리일이 이 라인보다 앞선 거래만 기준으로 씁니다. 이 라인과 "
                        "같은 날의 거래와 뒤의 거래(미래 거래)는 기준에 넣지 않습니다. 앞선 거래가 "
@@ -754,7 +768,7 @@ with st.container(border=True):
             for note in det.r3_notes:
                 st.caption(f"참고: {note}")
             st.markdown("**조건별 전표 수**")
-            st.dataframe(det.r3_counts, hide_index=True, use_container_width=True)
+            st.dataframe(det.r3_counts, hide_index=True, width="stretch")
             st.caption(f"적용 기준: 결산일 매년 {settings.closing_month}월 {settings.closing_day}일, 전후 {settings.r3_window}영업일. "
                        "(a)는 회계처리일 기준, (b)·(c)는 입력일시 기준이며 입력일시가 없는 전표는 (b)·(c)를 검사하지 않습니다. "
                        "(a-2)는 보조 옵션이며 꺼져 있어도 해당 전표 수를 위 표에 보여 줍니다. 한 전표가 여러 조건에 해당할 수 "
@@ -777,7 +791,7 @@ with st.container(border=True):
                 st.warning("적요 열은 연결되었지만 값이 모두 비어 있어 R4(d)는 평가하지 않았습니다(평가 불가). 모든 전표를 "
                            "'적요 없음'으로 올리지 않기 위해서입니다. 적요가 다른 열에 있다면 열 연결을 확인해 주세요.")
             st.markdown("**조건별 전표 수**")
-            st.dataframe(det.r4_counts, hide_index=True, use_container_width=True)
+            st.dataframe(det.r4_counts, hide_index=True, width="stretch")
             st.caption("한 전표가 여러 조건에 해당할 수 있어 조건별 수의 합은 R4 전표 수보다 클 수 있습니다. 값은 앞뒤 공백만 빼고 "
                        "파일에 적힌 그대로 비교합니다.")
             if det.r4.empty:
@@ -837,13 +851,14 @@ with st.container(border=True):
             shown["이 달 값"] = [f"{v:,.0f}" for v in shown["이 달 값"]]
             shown["다른 달 중앙값"] = [f"{v:,.0f}" for v in shown["다른 달 중앙값"]]
             st.dataframe(shown.style.format("{:,.2f}", subset=["중앙값 대비 배수"]), hide_index=True,
-                         use_container_width=True, column_config={"탐지 이유": st.column_config.TextColumn(width="large")})
+                         width="stretch", column_config={"탐지 이유": st.column_config.TextColumn(width="large")})
             st.caption("값의 단위는 '항목'이 라인 수이면 건, 금액이면 원입니다.")
 
-            options = [f"{r.계정코드} {r.계정과목명} · {r.연월}" for r in det.r2b.drop_duplicates(["계정코드", "연월"])
-                       .itertuples(index=False)]
-            choice = st.selectbox("그 달의 거래 보기 (참고용)", options, key="det_r2b_pick")
-            code, ym = choice.split(" ")[0], choice.split(" · ")[-1]
+            # 화면 글자 → (계정코드, 연월). 글자를 공백으로 다시 잘라 읽으면 공백이 든 계정코드가 틀어지므로 표에서 찾습니다.
+            periods = {f"{r.계정코드} {r.계정과목명} · {r.연월}": (r.계정코드, r.연월)
+                       for r in det.r2b.drop_duplicates(["계정코드", "연월"]).itertuples(index=False)}
+            choice = st.selectbox("그 달의 거래 보기 (참고용)", list(periods), key="det_r2b_pick")
+            code, ym = periods[choice]
             month_lines = df[(df["account_code"] == code) & (df["year_month"] == ym)]
             lines_shown = month_lines[["file_row", "je_id", "posting_date", "account_code", "account_name", "debit", "credit"]
                                       + (["vendor"] if "vendor" in month_lines else [])]
@@ -863,12 +878,12 @@ with st.container(border=True):
 # ---- 5-3. 기준·한계
 with st.expander("5-3. 탐지 기준과 한계"):
     st.markdown(f"**현재 적용한 기준값** · 기본값과 다른 항목 {len(changed)}개")
-    st.dataframe(settings.as_table().astype(str), hide_index=True, use_container_width=True, key="det_settings_table")
+    st.dataframe(settings.as_table().astype(str), hide_index=True, width="stretch", key="det_settings_table")
     st.caption("'기본값과 다름'이 '예'인 항목이 사용자가 바꾼 설정입니다. 왼쪽 사이드바의 '기본값으로 되돌리기'로 한 번에 "
                "기본값으로 돌아갑니다.")
     st.markdown("**규칙별 목적·조건·한계**")
     st.dataframe(pd.DataFrame([{"규칙": k, **v} for k, v in RULES.items()]), hide_index=True,
-                 use_container_width=True)
+                 width="stretch")
     st.caption(COMMON_LIMITS)
 
 
@@ -893,13 +908,13 @@ st.info("두 파일 모두 첫 장이 '안내'입니다. 판정의 뜻과 한계
 d1, d2 = st.columns(2)
 d1.download_button("Excel 파일 내려받기 (.xlsx)", xlsx_bytes, export_file_name(file_name, export_time, "xlsx"),
                    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", key="dl_xlsx",
-                   use_container_width=True)
+                   width="stretch")
 d2.download_button("CSV 묶음 내려받기 (.zip)", zip_bytes, export_file_name(file_name, export_time, "zip"),
-                   "application/zip", key="dl_zip", use_container_width=True,
+                   "application/zip", key="dl_zip", width="stretch",
                    help="ZIP 안에 안내 txt와 시트별 CSV(UTF-8)가 들어 있습니다. =, +, -, @로 시작하는 글자 값 앞에는 "
                         "작은따옴표(')를 붙였습니다.")
 with st.expander("파일에 들어가는 시트"):
     st.dataframe(pd.DataFrame(SHEETS, columns=["Excel 시트", "CSV 묶음 안의 파일", "내용"]), hide_index=True,
-                 use_container_width=True)
+                 width="stretch")
     st.caption("꺼진 규칙이나 기준금액을 넣지 않아 검사하지 않은 R5도 시트는 만들고, 결과가 없는 이유를 적습니다. 기초 분석(4단계) "
                "표는 넣지 않았습니다.")

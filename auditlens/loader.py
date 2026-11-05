@@ -50,8 +50,30 @@ def read_uploaded_file(file_name: str, data: bytes, sheet_name=None):
             f"지원하지 않는 파일 형식입니다: {file_name}. CSV(.csv) 또는 Excel(.xlsx) 파일을 올려 주세요."
         )
 
-    df.columns = [str(c).strip() for c in df.columns]
+    names, renamed = _unique_names([str(c).strip() for c in df.columns])
+    df.columns = names
+    if renamed:
+        info["renamed"] = renamed
     return df, info
+
+
+def _unique_names(names):
+    """앞뒤 공백을 지운 열 이름이 겹치면 뒤의 열에 '.1', '.2'를 붙여 구분합니다(pandas가 같은 이름에 붙이는 방식과 같음).
+
+    같은 이름의 열이 둘 이상이면 열 연결에서 한 열을 고를 수 없어 화면이 멈추므로, 값은 그대로 두고 이름만 구분합니다.
+    반환값: (새 이름 목록, [(원래 이름, 바꾼 이름), ...])
+    """
+    existing, used, out, renamed = set(names), set(), [], []
+    for name in names:
+        new, n = name, 0
+        while new in used or (new != name and new in existing):  # 파일에 이미 있는 이름과도 겹치지 않게 번호를 올림
+            n += 1
+            new = f"{name}.{n}"
+        used.add(new)
+        out.append(new)
+        if new != name:
+            renamed.append((name, new))
+    return out, renamed
 
 
 def _read_csv(data: bytes):
@@ -61,6 +83,7 @@ def _read_csv(data: bytes):
             # dtype=str: 계정코드 앞자리 0, 금액의 쉼표 등을 파일에 적힌 그대로 보존
             df = pd.read_csv(io.BytesIO(data), dtype=str, encoding=encoding,
                              keep_default_na=False, skipinitialspace=True)
+            _check_delimiter(df)
             return df, {"format": "CSV", "encoding": encoding, "sheet": None}
         except UnicodeDecodeError as exc:
             last_error = exc
@@ -75,6 +98,23 @@ def _read_csv(data: bytes):
     raise LoadError(
         "CSV 파일의 글자 인코딩을 알 수 없습니다. UTF-8 또는 CP949(Excel 기본 'CSV' 저장)로 저장해 주세요."
     ) from last_error
+
+
+def _check_delimiter(df):
+    """열이 하나뿐이고 그 이름에 세미콜론(;)이나 탭이 있으면, 쉼표가 아닌 구분 기호로 저장된 파일로 보고 안내합니다.
+
+    구분 기호를 추측해 다시 읽지는 않습니다. 열이 하나뿐이면 필수 열을 연결할 수 없어 어차피 분석할 수 없습니다.
+    """
+    if len(df.columns) != 1:
+        return
+    header = str(df.columns[0])
+    for mark, name in ((";", "세미콜론(;)"), ("\t", "탭")):
+        if mark in header:
+            raise LoadError(
+                f"CSV 파일의 열이 하나로만 읽혔습니다. 열 이름에 {name}이 있어 쉼표(,)가 아닌 {name}으로 열을 나눈 파일로 "
+                "보입니다. 이 프로그램은 쉼표로 구분한 CSV를 읽습니다. Excel에서 파일을 열어 'CSV UTF-8(쉼표로 분리)'로 다시 "
+                "저장하거나 .xlsx로 저장해 올려 주세요."
+            )
 
 
 def _read_excel(data: bytes, sheet_name):
