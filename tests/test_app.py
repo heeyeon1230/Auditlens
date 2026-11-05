@@ -412,3 +412,22 @@ def test_R2b_기간_선택은_공백이_든_계정코드도_그_계정의_라인
     at.selectbox(key="det_r2b_pick").set_value("110 01 가상미수금 · 2025-06").run()
     assert not at.exception
     assert any("2025-06 110 01 라인 12건" in c.value for c in at.caption)
+
+
+def test_행_끝의_빈_추가_열을_제거하면_열_수와_함께_안내():
+    data = ("전표번호,회계처리일,계정코드,계정과목명,차변금액,대변금액\n"
+            "J1,2025-01-02,830,소모품비,1000,,\nJ1,2025-01-02,103,보통예금,,1000,\n").encode("utf-8")
+    at = _upload(AppTest.from_file(APP, default_timeout=180).run(), "trailing.csv", data)
+    assert not at.exception
+    assert any("열 7개 → 6개" in i.value and "행은 2개" in i.value for i in at.info)
+    assert any("2행 × 6열" in s.value for s in at.success)
+    assert any("검증을 통과했습니다" in s.value for s in at.success)
+
+
+def test_추가_열에_값이_있으면_읽기를_멈추고_안내():
+    data = ("전표번호,회계처리일,계정코드,계정과목명,차변금액,대변금액\n"
+            "J1,2025-01-02,830,소모품비,1000,,메모\nJ1,2025-01-02,103,보통예금,,1000\n").encode("utf-8")
+    at = _upload(AppTest.from_file(APP, default_timeout=120).run(), "filled.csv", data)
+    assert not at.exception
+    assert any("열 구조가 맞지 않습니다" in e.value for e in at.error)
+    assert not any(h.value == "2. 열 연결" for h in at.header)

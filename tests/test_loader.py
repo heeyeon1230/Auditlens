@@ -86,3 +86,42 @@ def test_쉼표가_아닌_구분_기호로_저장한_CSV는_안내(sep, name):
 def test_열이_하나뿐인_정상_CSV는_그대로_읽음():
     df, _ = read_uploaded_file("a.csv", _csv("전표번호\nJ1\n"))
     assert list(df.columns) == ["전표번호"]
+
+
+# ---------------------------------------------------------------- 데이터 행 끝의 추가 열
+# 수정 전에는 모든 데이터 행 끝에 칸이 하나 더 있으면 첫 열이 행 이름으로 빠지고 열이 한 칸씩 밀려 읽혔습니다.
+@pytest.mark.parametrize("text, before, rows", [
+    ("전표번호,계정코드\nJ1,101,\nJ2,102,\n", 3, 2),           # 모든 행 끝에 쉼표 하나 (재현 사례)
+    ("전표번호,계정코드\nJ1,101\nJ2,102,\n", 3, 1),            # 일부 행만
+    ("전표번호,계정코드\nJ1,101,,\nJ2,102,\n", 4, 2),          # 빈 칸이 둘 이상
+    ("전표번호,계정코드\nJ1,101, \nJ2,102,\n", 3, 2),          # 공백만 있는 칸
+    ('전표번호,계정코드\nJ1,"1,01",\nJ2,102,\n', 3, 2),        # 따옴표 안의 쉼표는 칸으로 세지 않음
+])
+def test_행_끝의_빈_추가_열은_제거하고_정상으로_읽음(text, before, rows):
+    df, info = read_uploaded_file("a.csv", _csv(text))
+    assert list(df.columns) == ["전표번호", "계정코드"]
+    assert df.loc[0, "전표번호"] == "J1" and df.loc[1, "전표번호"] == "J2"  # 밀리지 않음
+    assert list(df.index) == [0, 1]
+    assert info["trimmed"] == {"before": before, "after": 2, "rows": rows}
+
+
+def test_행_끝의_빈_추가_열_CP949도_같게_처리():
+    df, info = read_uploaded_file("a.csv", _csv("전표번호,계정과목명\nJ1,보통예금,\n", "cp949"))
+    assert df.loc[0, "계정과목명"] == "보통예금" and info["trimmed"]["after"] == 2
+
+
+@pytest.mark.parametrize("text, rows", [
+    ("전표번호,계정코드\nJ1,101,메모\nJ2,102,\n", "2행"),       # 추가 열에 값
+    ("전표번호,계정코드\nJ1,101\nJ2,102,,0\n", "3행"),          # 빈 칸 뒤에 값
+    ("전표번호,계정코드\nJ1,1,000\nJ2,102\n", "2행"),           # 따옴표 없는 쉼표 금액
+])
+def test_추가_열에_값이_있으면_지우지_않고_읽기를_멈춤(text, rows):
+    with pytest.raises(LoadError, match="열 구조가 맞지 않습니다") as exc:
+        read_uploaded_file("a.csv", _csv(text))
+    assert f"예: {rows}" in str(exc.value) and "머리글(1행)은 2개 열" in str(exc.value)
+    assert "수정 방법" in str(exc.value)
+
+
+def test_열_수가_맞는_CSV는_추가_열_정보가_없음():
+    df, info = read_uploaded_file("a.csv", _csv("전표번호,계정코드\nJ1,101\n"))
+    assert "trimmed" not in info and df.loc[0, "계정코드"] == "101"
