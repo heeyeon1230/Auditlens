@@ -1,9 +1,10 @@
 """AuditLens 화면 (Streamlit).
 
 실행: streamlit run app.py
-현재 버전: 1) 데이터 불러오기  2) 열 연결  3) 데이터 검증  4) 기초 분석  5) 검토 대상 거래(R1~R6)
-결과 다운로드는 다음 개발 단위에서 추가합니다.
+현재 버전: 1) 데이터 불러오기  2) 열 연결  3) 데이터 검증  4) 기초 분석  5) 검토 대상 거래(R1~R6)  6) 결과 다운로드
 """
+
+import hashlib
 
 import pandas as pd
 import streamlit as st
@@ -16,6 +17,10 @@ from auditlens.analysis import (
 from auditlens.detection import RULE_SWITCHES, RULES, DetectionSettings, run_detection
 from auditlens.detection import PERIOD_LABEL, PRIORITY_GROUP, SUPPORT_GROUP, SUPPORT_LABEL, period_vouchers
 from auditlens.detection import REVIEW_LABEL as DETECTION_LABEL
+from auditlens.export import (
+    COMMON_LIMITS, MISS_NOTICE, REVIEW_NOTICE, SHEETS, build_tables, export_file_name, now_kst, to_csv_zip_bytes,
+    to_excel_bytes,
+)
 from auditlens.loader import LoadError, list_excel_sheets, read_uploaded_file
 from auditlens.sample_data import (
     COMPANY_NAME, CURRENT_YEAR, FICTIONAL_NOTICE, PRIOR_YEAR, generate_error_example,
@@ -57,8 +62,8 @@ st.info(
 
 with st.sidebar:
     st.header("진행 단계")
-    st.markdown("1. 데이터 불러오기\n2. 열 연결\n3. 데이터 검증\n4. 기초 분석\n5. 검토 대상 거래 (R1~R6)")
-    st.caption("결과 다운로드는 다음 개발 단위에서 추가될 예정입니다.")
+    st.markdown("1. 데이터 불러오기\n2. 열 연결\n3. 데이터 검증\n4. 기초 분석\n5. 검토 대상 거래 (R1~R6)\n6. 결과 다운로드")
+    st.caption("탐지 결과는 본문 맨 아래 '6. 결과 다운로드'에서 Excel 또는 CSV 묶음(ZIP)으로 내려받을 수 있습니다.")
 
 # ---------------------------------------------------------------- 1. 데이터 불러오기
 st.header("1. 데이터 불러오기")
@@ -415,12 +420,7 @@ with tab_month:
 
 # ---------------------------------------------------------------- 5. 검토 대상 거래 (R1~R6)
 st.header("5. 검토 대상 거래 (R1~R6)")
-st.warning(
-    f"여기 표시되는 거래는 '{DETECTION_LABEL}'입니다. 정해진 기준에서 벗어나 감사인이 먼저 살펴볼 만한 거래라는 뜻이며, "
-    "오류나 부정으로 확정한 것이 아닙니다. 각 거래의 탐지 이유와 판단 근거, 규칙의 한계를 함께 확인해 주세요.  \n"
-    "탐지되지 않은 거래가 정상 거래라는 뜻도 아닙니다. 규칙은 정해진 몇 가지 패턴만 보며, 기준에 걸리지 않는 방식의 "
-    "오류나 부정은 찾지 못합니다."
-)
+st.warning(f"{REVIEW_NOTICE}  \n{MISS_NOTICE}")  # 같은 문구를 내려받는 파일의 '안내'에도 씁니다(auditlens/export.py).
 st.caption(f"분석 기준: 4단계 기초 분석과 같은 {len(df):,}행(검증에서 제외된 행은 탐지 대상이 아님) · 금액 단위: 원 · "
            "계정은 계정코드로 구분하며 특정 업종의 계정 체계를 가정하지 않습니다.")
 
@@ -760,6 +760,37 @@ with st.expander("5-3. 탐지 기준과 한계"):
     st.markdown("**규칙별 목적·조건·한계**")
     st.dataframe(pd.DataFrame([{"규칙": k, **v} for k, v in RULES.items()]), hide_index=True,
                  use_container_width=True)
-    st.caption("공통 한계: 탐지 기준은 올린 파일 안의 비교에 근거하며 회사의 업무 내용, 증빙, 내부통제를 알지 못합니다. "
-               "탐지되지 않은 거래가 문제가 없다는 뜻이 아니며(미탐), 탐지된 거래 대부분은 정상일 수 있습니다(오탐). "
-               "감사기준서 240의 관련 문단은 원문을 확인한 뒤 인용할 예정이며, 이 화면에는 아직 인용하지 않았습니다.")
+    st.caption(COMMON_LIMITS)
+
+
+# ---------------------------------------------------------------- 6. 결과 다운로드
+@st.cache_data(show_spinner="다운로드 파일을 만드는 중입니다...", max_entries=4)
+def cached_export(_det, _result, _df, _notes, key):
+    """화면의 탐지 결과(det)를 그대로 파일로 옮깁니다. key(원본·열 연결·탐지 기준)가 같으면 다시 만들지 않습니다."""
+    created = now_kst()
+    tables = build_tables(_det, _result, _df, key[0], created, _notes)
+    return to_excel_bytes(tables), to_csv_zip_bytes(tables), created
+
+
+st.header("6. 결과 다운로드")
+export_key = (file_name, sheet, hashlib.sha256(data).hexdigest(), tuple(sorted(mapping.items())),
+              tuple(sorted(vars(settings).items())))
+xlsx_bytes, zip_bytes, export_time = cached_export(det, result, df, prep_notes, export_key)
+st.caption(f"위 5단계 화면과 같은 결과를 파일로 내려받습니다(다시 계산하지 않음). 지금 적용한 탐지 기준(기본값과 다른 항목 "
+           f"{len(changed)}개, 꺼진 규칙: {', '.join(off_rules) if off_rules else '없음'})이 '적용 기준' 시트에 함께 남습니다. "
+           f"파일 내용을 만든 시각: {export_time:%Y-%m-%d %H:%M} (한국 시간).")
+st.info("두 파일 모두 첫 장이 '안내'입니다. 판정의 뜻과 한계, 원본 파일 이름, 분석 행 수를 적었습니다. 파일의 결과도 "
+        "오류나 부정의 결론이 아니라 추가 검토가 필요할 수 있는 후보입니다.", icon="📄")
+d1, d2 = st.columns(2)
+d1.download_button("Excel 파일 내려받기 (.xlsx)", xlsx_bytes, export_file_name(file_name, export_time, "xlsx"),
+                   "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", key="dl_xlsx",
+                   use_container_width=True)
+d2.download_button("CSV 묶음 내려받기 (.zip)", zip_bytes, export_file_name(file_name, export_time, "zip"),
+                   "application/zip", key="dl_zip", use_container_width=True,
+                   help="ZIP 안에 안내 txt와 시트별 CSV(UTF-8)가 들어 있습니다. =, +, -, @로 시작하는 글자 값 앞에는 "
+                        "작은따옴표(')를 붙였습니다.")
+with st.expander("파일에 들어가는 시트"):
+    st.dataframe(pd.DataFrame(SHEETS, columns=["Excel 시트", "CSV 묶음 안의 파일", "내용"]), hide_index=True,
+                 use_container_width=True)
+    st.caption("꺼진 규칙이나 기준금액을 넣지 않아 검사하지 않은 R5도 시트는 만들고, 결과가 없는 이유를 적습니다. 기초 분석(4단계) "
+               "표는 넣지 않았습니다.")
