@@ -2,6 +2,7 @@
 
 from pathlib import Path
 
+import pandas as pd
 from streamlit.testing.v1 import AppTest
 
 APP = str(Path(__file__).resolve().parent.parent / "app.py")
@@ -43,7 +44,7 @@ def test_기초_분석_화면이_표시됨():
 def test_전기_비교_항목과_범위_변경():
     at = AppTest.from_file(APP, default_timeout=120).run()
     at.selectbox(key="analysis_measure").select("전표 수").run()
-    at.selectbox(key="analysis_scope").select("[구분] 재공품").run()
+    at.selectbox(key="analysis_scope").select("455 제품매출원가").run()  # 제조업 구분 대신 계정 단위
     assert not at.exception
     at.selectbox(key="analysis_account").select("455 제품매출원가").run()
     assert not at.exception
@@ -62,10 +63,10 @@ def test_분석표_금액_열에_단위_표시():
     at = AppTest.from_file(APP, default_timeout=120).run()
     headers = [list(d.value.columns) for d in at.dataframe]
     assert any("차변 합계 (원)" in h for h in headers)
-    assert any("전기 2024년 (원)" in h and "증감 (원)" in h for h in headers)
+    assert any("전기 2024 회계연도 (원)" in h and "증감 (원)" in h for h in headers)
     at.selectbox(key="analysis_measure").select("전표 수").run()
     headers = [list(d.value.columns) for d in at.dataframe]
-    assert any("전기 2024년 (건)" in h for h in headers)
+    assert any("전기 2024 회계연도 (건)" in h for h in headers)
 
 
 REVIEW_CSV = (
@@ -183,7 +184,11 @@ def test_탐지_기준_설정이_사이드바에_있고_기본값이면_변경_0
     assert not at.exception
     assert any(h.value == "탐지 기준 설정" for h in at.sidebar.header)
     labels = [e.label for e in at.sidebar.expander]
-    assert labels == ["공통: 결산일", "R1 금액 분포", "R2(a) 거래처 이전 거래", "R2(b) 계정-월 이상 기간", "R3 시점",
+    # 결산일은 기초 분석(회계연도)과 탐지가 함께 쓰므로 범용화 작업에서 사이드바 맨 위 '공통: 결산일'로 옮겼습니다.
+    headers = [h.value for h in at.sidebar.header]
+    assert headers.index("공통: 결산일") < headers.index("탐지 기준 설정")
+    assert at.sidebar.number_input(key="det_closing_month").value == 12
+    assert labels == ["R1 금액 분포", "R2(a) 거래처 이전 거래", "R2(b) 계정-월 이상 기간", "R3 시점",
                       "R4 수기·조정", "R5 신규 거래처", "R6 중복 가능"]
     assert [t.label for t in at.sidebar.toggle] == ["R1 사용", "R2(a) 사용", "R2(b) 사용", "R3 사용", "R4 사용", "R5 사용",
                                                     "R6 사용"]
@@ -271,3 +276,86 @@ def test_금액_한_열_형식_업로드와_구분값_연결():
     assert any("차대 구분 값이 비어 있는 행이 1개" in w.value for w in at.warning)
     assert metrics["R1 라인"] == "2"  # BIG 전표의 차변·대변 라인 (두 열 형식 같은 자료의 기존 테스트와 같음)
     assert any(h.value == "6. 결과 다운로드" for h in at.header)
+
+
+# ---------------------------------------------------------------- 범용화: 회계연도·계정별 분석·날짜와 숫자 표기·R4(d)
+def _march_csv(description=True, blank_description=False):
+    """3월 결산 서비스업을 가정한 가상 분개장(2024-04 ~ 2026-03, 영문 열 이름). 실제 회사 자료 아님."""
+    head = "Document Number,Posting Date,GL Account,Account Description,Debit,Credit" + (",Text" if description else "")
+    lines = [head]
+    months = pd.period_range("2024-04", "2026-03", freq="M")
+    for n, ym in enumerate(months):
+        day = f"{ym.year}-{ym.month:02d}-15"
+        text = "" if blank_description else f",용역 수익 {n}"
+        lines += [f"D{n},{day},103000,보통예금,{100000 + n},0{text if description else ''}",
+                  f"D{n},{day},411000,용역매출,0,{100000 + n}{text if description else ''}"]
+    return "\n".join(lines).encode("utf-8")
+
+
+def _upload(at, name, data):
+    at.radio[0].set_value("내 파일 업로드").run()
+    at.file_uploader[0].upload(name, data, "text/csv").run()
+    return at
+
+
+def test_결산월을_바꾸면_기초_분석의_회계연도가_바뀜():
+    at = _upload(AppTest.from_file(APP, default_timeout=180).run(), "march.csv", _march_csv())
+    assert not at.exception and not at.error  # 영문 열 이름이 자동 연결됨
+    fy = [d.value for d in at.dataframe if "회계기간" in d.value.columns][0]
+    assert list(fy["회계연도"]) == [2024, 2025, 2026]  # 12월 결산(기본): 달력 연도
+    at.sidebar.number_input(key="det_closing_month").set_value(3).run()
+    assert not at.exception
+    fy = [d.value for d in at.dataframe if "회계기간" in d.value.columns][0]
+    assert list(fy["회계연도"]) == [2025, 2026]
+    assert list(fy["회계기간"]) == ["2024-04 ~ 2025-03", "2025-04 ~ 2026-03"]
+    compare = [d.value for d in at.dataframe if "증감률(%)" in d.value.columns][0]
+    assert list(compare["월"])[:2] == ["4월", "5월"] and list(compare["월"])[11] == "3월"
+    assert not compare["비고"].astype(bool).any()  # 두 회계연도 모두 12개월 자료
+    assert any("회계연도: 4월 ~ 3월(3월 결산" in c.value for c in at.caption)
+
+
+def test_상위_계정_표와_제조업_표_제거():
+    at = AppTest.from_file(APP, default_timeout=120).run()
+    subheaders = [h.value for h in at.subheader]
+    assert "상위 계정" in subheaders and "제조업 주요 계정" not in subheaders
+    top = [d.value for d in at.dataframe if "금액 비중(%)" in d.value.columns][0]
+    assert len(top) == 10
+    at.number_input(key="analysis_top_n").set_value(5).run()
+    at.selectbox(key="analysis_top_measure").select("라인 수").run()
+    assert not at.exception
+    top = [d.value for d in at.dataframe if "금액 비중(%)" in d.value.columns][0]
+    assert len(top) == 5 and top["라인 수"].is_monotonic_decreasing
+    assert not any(o.startswith("[구분]") for o in at.selectbox(key="analysis_scope").options)
+
+
+def test_모호한_날짜는_순서를_골라야_분석():
+    data = ("전표번호,회계처리일,계정코드,계정과목명,차변금액,대변금액\n"
+            "J1,03/04/2025,131,원재료,1000,\nJ1,03/04/2025,251,외상매입금,,1000\n").encode("utf-8")
+    at = _upload(AppTest.from_file(APP, default_timeout=120).run(), "mdy.csv", data)
+    assert any("월·일 순서를 알 수 없는 날짜" in e.value for e in at.error)
+    order = [r for r in at.radio if r.label.startswith("날짜 순서")][0]
+    order.set_value("일/월/연도").run()
+    assert not at.exception and not at.error
+    preview = [d.value for d in at.dataframe if "파일 행 번호" in d.value.columns and "회계처리일" in d.value.columns][0]
+    assert str(preview["회계처리일"].iloc[0])[:10] == "2025-04-03"
+
+
+def test_유럽식_숫자_표기를_고르면_읽음():
+    data = ("전표번호,회계처리일,계정코드,계정과목명,차변금액,대변금액\n"
+            'J1,2025-01-02,131,원재료,"1.000,50",\nJ1,2025-01-02,251,외상매입금,,"1.000,50"\n').encode("utf-8")
+    at = _upload(AppTest.from_file(APP, default_timeout=120).run(), "eu.csv", data)
+    assert any("유럽식 표기(예: 1.000,50)로 보이는" in w.value for w in at.warning)
+    assert any("분석을 시작할 수 없습니다" in e.value for e in at.error)  # 두 행 모두 제외되어 분석할 행 없음
+    [r for r in at.radio if r.label == "숫자 표기"][0].set_value("유럽식 (1.234,56)").run()
+    assert not at.exception and not at.error
+    preview = [d.value for d in at.dataframe if "파일 행 번호" in d.value.columns and "차변금액" in d.value.columns][0]
+    assert preview["차변금액"].iloc[0] == 1000.5
+
+
+def test_적요가_모두_비면_R4d_평가_불가_안내():
+    at = _upload(AppTest.from_file(APP, default_timeout=180).run(), "blank.csv", _march_csv(blank_description=True))
+    assert not at.exception
+    assert any("R4(d)는 평가하지 않았습니다(평가 불가)" in w.value for w in at.warning)
+    counts = [d.value for d in at.dataframe if "적용 여부" in d.value.columns][0].set_index("조건")
+    assert counts.loc["(d) 적요 없음·키워드", "적용 여부"] == "평가 불가 (적요 열의 값이 모두 비어 있음)"
+    assert counts.loc["(d) 적요 없음·키워드", "해당 전표 수"] == 0

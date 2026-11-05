@@ -10,12 +10,14 @@
 그 사실을 정보로 알립니다.
 """
 
-import re
 from dataclasses import dataclass, field
-from datetime import date, datetime
 
 import pandas as pd
 
+from auditlens.formats import (
+    BAD_CURRENCY, BAD_EUROPEAN, BAD_EXPONENT, BAD_GROUPING, BAD_INVALID, BAD_STANDARD, DAY_ORDERS, NOTATION_EUROPEAN,
+    NOTATION_STANDARD, AmountError, count_ambiguous_dates, read_amount, read_date,
+)
 from auditlens.schema import COLUMN_LABELS, REQUIRED_COLUMNS, SINGLE_AMOUNT_LABELS
 
 ERROR = "오류"
@@ -25,10 +27,6 @@ INFO = "정보"
 MAX_EXAMPLES = 5  # 메시지에 보여 줄 예시 행 수
 DEBIT_SIDE, CREDIT_SIDE = "차변", "대변"  # 금액 한 열 형식에서 구분값을 연결할 쪽
 BALANCE_TOLERANCE = 1  # 전표별 차대 차이 허용액(원). 단수 차이 1원까지는 같은 것으로 봅니다.
-
-DATE_FORMATS = ["%Y-%m-%d", "%Y/%m/%d", "%Y.%m.%d", "%Y%m%d",
-                "%Y-%m-%d %H:%M", "%Y-%m-%d %H:%M:%S", "%Y/%m/%d %H:%M", "%Y/%m/%d %H:%M:%S",
-                "%Y.%m.%d %H:%M", "%Y.%m.%d %H:%M:%S"]
 
 
 @dataclass
@@ -77,50 +75,22 @@ def _is_blank(value):
     return isinstance(value, str) and value.strip() == ""
 
 
-def parse_date(value):
-    """날짜로 읽을 수 있으면 Timestamp, 빈 값이면 None, 읽을 수 없으면 ValueError."""
-    if _is_blank(value):
-        return None
-    if isinstance(value, pd.Timestamp):
-        return value
-    if isinstance(value, (datetime, date)):
-        return pd.Timestamp(value)
-    text = str(value).strip()
-    for fmt in DATE_FORMATS:
-        try:
-            return pd.Timestamp(datetime.strptime(text, fmt))
-        except ValueError:
-            continue
-    raise ValueError(text)
+def parse_date(value, day_order=None):
+    """날짜로 읽을 수 있으면 Timestamp, 빈 값이면 None, 읽을 수 없으면 ValueError(모호하면 AmbiguousDate).
+
+    읽는 규칙은 auditlens/formats.py의 read_date에 있습니다.
+    """
+    return read_date(value, day_order)[0]
 
 
-_AMOUNT_NOISE = re.compile(r"[,\s원₩]")
-
-
-def parse_amount(value):
-    """금액으로 읽을 수 있으면 float, 빈 값이면 0, 읽을 수 없으면 ValueError.
+def parse_amount(value, notation=NOTATION_STANDARD):
+    """금액으로 읽을 수 있으면 float, 빈 값이면 0, 읽을 수 없으면 ValueError(AmountError).
 
     반환값: (금액, 표기 정리 여부). 쉼표·공백·'원'을 지웠으면 표기 정리 여부가 True입니다.
-    괄호 표기 (1,000)은 음수 -1000으로 읽습니다.
+    괄호 표기 (1,000)은 음수 -1000으로 읽습니다. 읽는 규칙은 auditlens/formats.py의 read_amount에 있습니다.
     """
-    if _is_blank(value):
-        return 0.0, False
-    if isinstance(value, bool):
-        raise ValueError(str(value))
-    if isinstance(value, (int, float)):
-        return float(value), False
-    text = str(value).strip()
-    cleaned = _AMOUNT_NOISE.sub("", text)
-    negative = cleaned.startswith("(") and cleaned.endswith(")")
-    if negative:
-        cleaned = cleaned[1:-1]
-    try:
-        number = float(cleaned)
-    except ValueError:
-        raise ValueError(text) from None
-    if pd.isna(number) or number in (float("inf"), float("-inf")):
-        raise ValueError(text)
-    return (-number if negative else number), cleaned != text
+    number, notes = read_amount(value, notation)
+    return number, "tidied" in notes
 
 
 def _normalize_code(value):
@@ -168,7 +138,8 @@ def _add(result, level, code, item, problem, fix, rows=None, examples=""):
     })
 
 
-def validate_journal(raw: pd.DataFrame, mapping: dict, single_amount: dict = None) -> ValidationResult:
+def validate_journal(raw: pd.DataFrame, mapping: dict, single_amount: dict = None,
+                     formats: dict = None) -> ValidationResult:
     """업로드한 표와 열 연결 정보를 받아 검증하고, 분석용 표를 만듭니다.
 
     mapping: {표준 열 이름: 파일 열 이름 또는 None}
@@ -176,8 +147,14 @@ def validate_journal(raw: pd.DataFrame, mapping: dict, single_amount: dict = Non
                    "sides": {구분값: "차변" 또는 "대변"}}. 이때 mapping의 차변금액·대변금액 연결은 쓰지 않고,
                    구분값이 가리키는 쪽에 금액을 그대로 옮겨 차변금액·대변금액 두 열을 만듭니다(부호는 바꾸지 않음).
                    구분값이 비었거나 차변·대변으로 지정하지 않은 행은 경고(V12)와 함께 분석에서 제외합니다.
+    formats: 사용자가 고른 표기. {"day_order": None 또는 formats.DAY_ORDERS 중 하나,
+             "notation": formats.NOTATION_STANDARD(기본) 또는 NOTATION_EUROPEAN}. 넣지 않으면 기본 표기,
+             날짜 순서는 고르지 않은 것으로 봅니다(03/04/2025 같은 값이 있으면 V3 오류).
     """
     result = ValidationResult()
+    formats = formats or {}
+    day_order = formats.get("day_order") if formats.get("day_order") in DAY_ORDERS else None
+    notation = NOTATION_EUROPEAN if formats.get("notation") == NOTATION_EUROPEAN else NOTATION_STANDARD
     single = single_amount is not None
     if single:
         mapping = {k: (None if k in ("debit", "credit") else v) for k, v in mapping.items()}
@@ -231,6 +208,17 @@ def validate_journal(raw: pd.DataFrame, mapping: dict, single_amount: dict = Non
     if len(raw) == 0:
         _add(result, ERROR, "V2", "파일 전체", "머리글(열 이름)만 있고 데이터 행이 없습니다.",
              "분개 데이터가 들어 있는 파일인지, Excel이라면 올바른 시트를 선택했는지 확인해 주세요.")
+
+    # V3 월·일 순서가 모호한 날짜(예: 03/04/2025). 프로그램이 순서를 추측하지 않고, 사용자가 고를 때까지 멈춥니다.
+    if day_order is None and not result.has_errors:
+        for col in ("posting_date", "entry_date"):
+            file_col = mapping.get(col)
+            n = count_ambiguous_dates(raw[file_col]) if file_col in raw else 0
+            if n:
+                _add(result, ERROR, "V3", _label(col),
+                     f"월·일 순서를 알 수 없는 날짜(예: 03/04/2025)가 {n}개 행에 있습니다. 3월 4일인지 4월 3일인지 "
+                     "프로그램이 정하지 않습니다.",
+                     "열 연결 화면의 '날짜 순서'에서 이 파일의 날짜가 월/일/연도인지 일/월/연도인지 골라 주세요.")
 
     if result.has_errors:
         return result
@@ -291,16 +279,27 @@ def validate_journal(raw: pd.DataFrame, mapping: dict, single_amount: dict = Non
              "계정과목명을 채워 주세요. 분석은 계정코드 기준으로 진행되므로 이 행들은 제외하지 않습니다.",
              blank_names, _examples(blank_names))
 
-    # V3 날짜 형식
-    parsed_dates = {}
-    bad_idx, bad_vals = [], []
-    for i, v in work["posting_date"].items():
-        try:
-            parsed_dates[i] = parse_date(v)
-        except ValueError as exc:
-            bad_idx.append(i)
-            bad_vals.append(str(exc))
-            parsed_dates[i] = None
+    # V3 날짜 형식 (읽는 규칙: auditlens/formats.py read_date)
+    def read_dates(col):
+        parsed, bad_idx, bad_vals, tz_idx = {}, [], [], []
+        for i, v in work[col].items():
+            try:
+                parsed[i], notes = read_date(v, day_order)
+                if "timezone" in notes:
+                    tz_idx.append(i)
+            except ValueError as exc:
+                bad_idx.append(i)
+                bad_vals.append(str(exc))
+                parsed[i] = None
+        if tz_idx:
+            _add(result, INFO, "V3", _label(col),
+                 f"시간대 표시(Z, +09:00 등)가 붙은 {COLUMN_LABELS[col]}이(가) {len(tz_idx)}개 행에 있습니다. 적힌 날짜·시각을 "
+                 "그대로 쓰고 시간대는 환산하지 않았습니다.",
+                 "파일의 시각이 회사 현지 시각이 아니라면(예: UTC) 날짜가 하루 달라질 수 있으니 확인해 주세요.",
+                 tz_idx, _examples(tz_idx))
+        return parsed, bad_idx, bad_vals
+
+    parsed_dates, bad_idx, bad_vals = read_dates("posting_date")
     if bad_idx:
         exclude(bad_idx, [f"회계처리일 형식 오류('{v}')" for v in bad_vals])
         _add(result, WARNING, "V3", _label("posting_date"),
@@ -311,15 +310,7 @@ def validate_journal(raw: pd.DataFrame, mapping: dict, single_amount: dict = Non
     work["posting_date"] = pd.to_datetime(pd.Series(parsed_dates))
 
     if "entry_date" in work:
-        parsed_entry = {}
-        bad_idx, bad_vals = [], []
-        for i, v in work["entry_date"].items():
-            try:
-                parsed_entry[i] = parse_date(v)
-            except ValueError as exc:
-                bad_idx.append(i)
-                bad_vals.append(str(exc))
-                parsed_entry[i] = None
+        parsed_entry, bad_idx, bad_vals = read_dates("entry_date")
         if bad_idx:
             _add(result, WARNING, "V3", _label("entry_date"),
                  f"날짜·시간으로 읽을 수 없는 입력일시가 {len(bad_idx)}개 행에 있습니다.",
@@ -328,31 +319,67 @@ def validate_journal(raw: pd.DataFrame, mapping: dict, single_amount: dict = Non
                  bad_idx, _examples(bad_idx, bad_vals))
         work["entry_date"] = pd.to_datetime(pd.Series(parsed_entry))
 
-    # V4 금액 형식
-    cleaned_notation = []
+    # V4 금액 형식 (읽는 규칙: auditlens/formats.py read_amount). 읽지 못한 이유별로 따로 알립니다.
+    other = "기본" if notation == NOTATION_EUROPEAN else "유럽식"
+    bad_messages = {
+        BAD_INVALID: ("숫자로 읽을 수 없는", "숫자만 입력해 주세요(예: 1500000 또는 1,500,000)."),
+        BAD_GROUPING: ("천 단위 구분 기호의 위치가 맞지 않는",
+                       "천 단위 구분 기호는 세 자리마다 있어야 합니다(예: 1,500,000). 잘못 입력한 값인지 확인해 주세요."),
+        BAD_EUROPEAN: ("유럽식 표기(예: 1.000,50)로 보이는",
+                       "파일이 유럽식 표기라면 열 연결 화면의 '숫자 표기'를 '유럽식'으로 바꿔 주세요. 기본 표기로 읽으면 "
+                       "값이 달라질 수 있어 읽지 않았습니다."),
+        BAD_STANDARD: ("기본 표기(예: 1,000.50)로 보이는",
+                       "파일이 기본 표기라면 열 연결 화면의 '숫자 표기'를 '기본'으로 바꿔 주세요. 유럽식으로 읽으면 "
+                       "값이 달라질 수 있어 읽지 않았습니다."),
+        BAD_CURRENCY: ("원화가 아닌 통화 기호($, USD, € 등)가 붙은",
+                       "이 프로그램은 환율 환산을 하지 않습니다. 원화 금액으로 바꾼 파일을 올려 주세요."),
+        BAD_EXPONENT: ("지수 표기(예: 1.5E+06)로 적힌",
+                       "Excel에서 셀 서식을 '숫자'로 바꾸어 전체 자릿수가 보이게 저장해 주세요."),
+    }
+    tidied_rows, sign_rows, check_rows, check_vals = set(), set(), [], []
     for col in ["debit", "credit"]:
         values = {}
-        bad_idx, bad_vals = [], []
+        bad = {}
         for i, v in work[col].items():
             try:
-                values[i], tidied = parse_amount(v)
-                if tidied:
-                    cleaned_notation.append(i)
-            except ValueError as exc:
-                bad_idx.append(i)
-                bad_vals.append(str(exc))
+                values[i], notes = read_amount(v, notation)
+                if "tidied" in notes:
+                    tidied_rows.add(i)
+                if "sign_notation" in notes:
+                    sign_rows.add(i)
+                if "check_separator" in notes:
+                    check_rows.append(i)
+                    check_vals.append(str(v).strip())
+            except AmountError as exc:
+                bad.setdefault(exc.reason, []).append((i, exc.text))
                 values[i] = 0.0
-        if bad_idx:
-            exclude(bad_idx, [f"{amount_names[col]} 형식 오류('{v}')" for v in bad_vals])
-            item = (f"금액({single_amount['amount']}) · {'차변' if col == 'debit' else '대변'}으로 지정한 행" if single
-                    else _label(col))
+        item = (f"금액({single_amount['amount']}) · {'차변' if col == 'debit' else '대변'}으로 지정한 행" if single
+                else _label(col))
+        for reason, (what, fix) in bad_messages.items():
+            if reason not in bad:
+                continue
+            idx = [i for i, _ in bad[reason]]
+            vals = [t for _, t in bad[reason]]
+            suffix = "" if reason == BAD_INVALID else f", {reason}"
+            exclude(idx, [f"{amount_names[col]} 형식 오류('{t}'{suffix})" for t in vals])
             _add(result, WARNING, "V4", item,
-                 f"숫자로 읽을 수 없는 {amount_names[col]}이 {len(bad_idx)}개 행에 있습니다.",
-                 "숫자만 입력해 주세요(예: 1500000 또는 1,500,000). 이 행들은 분석에서 제외됩니다.",
-                 bad_idx, _examples(bad_idx, bad_vals))
+                 f"{what} {amount_names[col]}이 {len(idx)}개 행에 있습니다.",
+                 f"{fix} 이 행들은 분석에서 제외됩니다.", idx, _examples(idx, vals))
         work[col] = pd.Series(values, dtype=float)
-    if cleaned_notation:
-        rows = sorted(set(cleaned_notation))
+    if check_rows:
+        _add(result, WARNING, "V4", "금액 표기 확인",
+             f"구분 기호 뒤에 세 자리만 있어 표기에 따라 1,000배 달라지는 금액이 {len(check_rows)}개 행에 있습니다. "
+             f"'{notation.split(' ')[0]}' 표기로 읽었습니다(예: {check_vals[0]} → {read_amount(check_vals[0], notation)[0]:,g}).",
+             f"파일이 {other} 표기라면 열 연결 화면의 '숫자 표기'를 바꿔 주세요. 맞게 읽었다면 조치할 필요는 없습니다. "
+             "이 행들은 분석에 포함됩니다.",
+             check_rows, _examples(check_rows, check_vals))
+    if sign_rows:
+        rows = sorted(sign_rows)
+        _add(result, INFO, "V4", "음수 표기",
+             f"뒤 마이너스(1,000-)나 △·▲ 표기를 음수로 읽은 행이 {len(rows)}개 있습니다.",
+             "조치할 필요는 없습니다. 부호는 바꾸지 않으며, 음수 금액은 아래 V7에서 따로 알립니다.", rows, _examples(rows))
+    if tidied_rows:
+        rows = sorted(tidied_rows)
         _add(result, INFO, "V4", "금액 표기",
              f"금액의 쉼표·공백·'원' 표기를 지우고 숫자로 읽은 행이 {len(rows)}개 있습니다.",
              "조치할 필요는 없습니다. 원본 파일은 바뀌지 않습니다.", rows, _examples(rows))

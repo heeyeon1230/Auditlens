@@ -10,17 +10,18 @@ import pandas as pd
 import streamlit as st
 
 from auditlens.analysis import (
-    CHART_UNIT, CHART_UNIT_LABEL, KEY_ACCOUNT_GROUPS, MEASURES, REVIEW_LABEL, account_summary, accounts_in_group,
-    compare_years, fiscal_years, key_account_summary, monthly_summary, overview, prepare,
+    CHART_UNIT, CHART_UNIT_LABEL, MEASURES, REVIEW_LABEL, TOP_MEASURES, account_summary, compare_years,
+    fiscal_month_order, fiscal_year_summary, fiscal_years, monthly_summary, overview, prepare, top_accounts,
     unbalanced_vouchers, unverifiable_vouchers, voucher_lines,
 )
-from auditlens.detection import RULE_SWITCHES, RULES, DetectionSettings, run_detection
+from auditlens.detection import RULE_SWITCHES, RULES, DetectionSettings, description_fill_rate, run_detection
 from auditlens.detection import PERIOD_LABEL, PRIORITY_GROUP, SUPPORT_GROUP, SUPPORT_LABEL, period_vouchers
 from auditlens.detection import REVIEW_LABEL as DETECTION_LABEL
 from auditlens.export import (
     COMMON_LIMITS, MISS_NOTICE, REVIEW_NOTICE, SHEETS, build_tables, export_file_name, now_kst, to_csv_zip_bytes,
     to_excel_bytes,
 )
+from auditlens.formats import DAY_ORDERS, NOTATION_STANDARD, NOTATIONS, count_ambiguous_dates, is_ambiguous_date
 from auditlens.loader import LoadError, list_excel_sheets, read_uploaded_file
 from auditlens.sample_data import (
     COMPANY_NAME, CURRENT_YEAR, FICTIONAL_NOTICE, PRIOR_YEAR, generate_error_example,
@@ -53,10 +54,11 @@ def cached_read(file_name, data, sheet):
 
 
 @st.cache_data(show_spinner="데이터를 검증하는 중입니다...")
-def cached_validate(raw, mapping_items, single_items=None):
+def cached_validate(raw, mapping_items, single_items=None, format_items=(None, NOTATION_STANDARD)):
     single = None if single_items is None else {"amount": single_items[0], "dc_flag": single_items[1],
                                                 "sides": dict(single_items[2])}
-    return validate_journal(raw, dict(mapping_items), single)
+    return validate_journal(raw, dict(mapping_items), single,
+                            {"day_order": format_items[0], "notation": format_items[1]})
 
 
 # ---------------------------------------------------------------- 머리말
@@ -200,9 +202,29 @@ if missing_optional:
     st.caption("연결하지 않은 선택 항목: " + ", ".join(missing_optional)
                + " → 이 항목이 필요한 일부 탐지 규칙은 나중에 자동으로 꺼집니다.")
 
+# 날짜·숫자 표기: 해석이 둘 이상 가능한 표기는 프로그램이 고르지 않고 사용자가 고릅니다(auditlens/formats.py).
+with st.container(border=True):
+    st.markdown("**날짜·숫자 표기**")
+    ambiguous = {c: count_ambiguous_dates(raw[mapping[c]]) for c in ("posting_date", "entry_date")
+                 if mapping.get(c) in raw}
+    ambiguous = {c: n for c, n in ambiguous.items() if n}
+    day_order = None
+    if ambiguous:
+        shown = ", ".join(f"{COLUMN_LABELS[c]} {n:,}행" for c, n in ambiguous.items())
+        example = next(v for c in ambiguous for v in raw[mapping[c]] if is_ambiguous_date(v))
+        day_order = st.radio(
+            f"날짜 순서 · 월·일 순서가 모호한 날짜가 있습니다({shown}, 예: '{example}')", DAY_ORDERS, index=None,
+            horizontal=True, key=f"day_order_{file_name}_{sheet}",
+            help="03/04/2025가 3월 4일인지 4월 3일인지 프로그램이 정하지 않습니다. 고르기 전에는 검증 오류로 멈춥니다.")
+    notation = st.radio(
+        "숫자 표기", NOTATIONS, horizontal=True, key=f"notation_{file_name}_{sheet}",
+        help="기본은 쉼표가 천 단위, 점이 소수점입니다(1,234.56). 유럽식은 점이 천 단위, 쉼표가 소수점입니다(1.234,56). "
+             "고른 표기와 맞지 않는 금액은 다른 값으로 읽지 않고 경고와 함께 분석에서 제외합니다.")
+format_items = (day_order, notation)
+
 # ---------------------------------------------------------------- 3. 데이터 검증
 st.header("3. 데이터 검증")
-result = cached_validate(raw, tuple(sorted(mapping.items())), single_items)
+result = cached_validate(raw, tuple(sorted(mapping.items())), single_items, format_items)
 table = result.issues_table()
 n_err = int((table["등급"] == ERROR).sum())
 n_warn = int((table["등급"] == WARNING).sum())
@@ -236,8 +258,12 @@ with st.expander("검증 항목 설명"):
     st.markdown(
         "- **V1 필수 열**: 전표번호, 회계처리일, 계정코드, 계정과목명, 차변금액, 대변금액\n"
         "- **V2 빈 파일**: 데이터 행이 1개 이상인지\n"
-        "- **V3 날짜 형식**: 회계처리일(필수)·입력일시(선택)를 날짜로 읽을 수 있는지\n"
-        "- **V4 금액 형식**: 차변·대변 금액을 숫자로 읽을 수 있는지\n"
+        "- **V3 날짜 형식**: 회계처리일(필수)·입력일시(선택)를 날짜로 읽을 수 있는지. 읽는 표기: 2025-03-31, 2025/03/31, "
+        "2025.03.31, 2025. 3. 31., 20250331, 시간이 붙은 형태, ISO(2025-03-31T14:05:30). 03/31/2025처럼 월·일 순서가 "
+        "모호한 표기는 '날짜 순서'를 골라야 읽음\n"
+        "- **V4 금액 형식**: 차변·대변 금액을 숫자로 읽을 수 있는지. 쉼표·원·₩·KRW·공백은 지우고 읽고, 괄호·마이너스·뒤 "
+        "마이너스·△·▲는 음수. 원화가 아닌 통화, 지수 표기, 천 단위 구분 위치가 틀린 값, 고른 '숫자 표기'와 맞지 않는 값은 "
+        "읽지 않음\n"
         "- **V5 필수 값 결측**: 전표번호·회계처리일·계정코드·계정과목명이 비어 있지 않은지\n"
         "- **V6 차대 기재**: 한 행에 차변 또는 대변 중 하나만 있는지\n"
         "- **V7 음수 금액**: 음수 금액 여부(역분개 표기 방식일 수 있음)\n"
@@ -259,17 +285,32 @@ if result.clean is not None:
         preview = result.clean.head(100).rename(columns={**COLUMN_LABELS, "file_row": "파일 행 번호"})
         st.dataframe(preview, hide_index=True, use_container_width=True)
 
+# 결산월·결산일은 기초 분석(회계연도)과 탐지(R3·R4(c))가 함께 씁니다. 기초 분석보다 먼저 읽어야 하므로 여기서 그립니다.
+# 입력칸 이름표(key)는 그대로라 '기본값으로 되돌리기'와 탐지 기준 변경 표시에 계속 포함됩니다.
+with st.sidebar:
+    st.divider()
+    st.header("공통: 결산일")
+    st.caption("기초 분석의 회계연도와 탐지 규칙 R3·R4(c)에 함께 씁니다.")
+    closing_month = st.number_input("결산월", 1, 12, DetectionSettings().closing_month, key="det_closing_month",
+                                    help="회계연도는 결산월 다음 달부터 결산월까지이고, 끝나는 해의 이름으로 부릅니다"
+                                         "(예: 3월 결산이면 2025년 4월 ~ 2026년 3월이 2026 회계연도).")
+    closing_day = st.number_input("결산일", 1, 31, DetectionSettings().closing_day, key="det_closing_day",
+                                  help="그 달에 없는 날이면 그 달 말일로 맞춥니다(예: 2월 30일 → 2월 28일). "
+                                       "R3와 R4(c)에 씁니다. 기초 분석은 월 단위로 회계연도를 나눕니다.")
+
 # ---------------------------------------------------------------- 4. 기초 분석
 st.header("4. 기초 분석")
 if result.clean is None:
     st.info("검증 '오류'를 해결하면 기초 분석이 표시됩니다.")
     st.stop()
 
-df, prep_notes = prepare(result.clean)
+df, prep_notes = prepare(result.clean, int(closing_month))
+fy_first, fy_last = fiscal_month_order(int(closing_month))[0], int(closing_month)
 st.caption(
     f"분석 기준: 3단계 검증을 통과한 {len(result.clean):,}행"
     f"{f' (검증에서 제외한 {len(result.excluded_rows):,}행은 포함하지 않음)' if result.excluded_rows else ''} · "
-    f"금액 단위: 표는 원, 차트는 {CHART_UNIT_LABEL} · 연도·월은 회계처리일 기준, 회계연도는 1~12월로 가정 · "
+    f"금액 단위: 표는 원, 차트는 {CHART_UNIT_LABEL} · 연도·월은 회계처리일 기준 · "
+    f"회계연도: {fy_first}월 ~ {fy_last}월({int(closing_month)}월 결산, 끝나는 해의 이름. 사이드바에서 변경) · "
     "이 화면은 데이터를 이해하기 위한 요약이며 이상 거래 탐지 결과가 아닙니다."
 )
 for note in prep_notes:
@@ -384,20 +425,31 @@ with tab_overview:
 
 with tab_account:
     accounts = account_summary(df)
-    key = key_account_summary(df)
-    st.subheader("제조업 주요 계정")
-    st.caption("원가 흐름: 원재료 → (제조원가 투입) → 재공품 → 제품 → 매출원가. 자산 계정은 차변이 증가, "
-               "대변이 감소이고, 비용 계정은 차변이 발생입니다. 분류는 아래 '분류 기준'에 따라 계정과목명과 "
-               "계정코드로 자동 판단하므로, 회사 계정체계와 다르면 실제와 맞지 않을 수 있습니다.")
-    st.dataframe(money(key, ["차변 합계", "대변 합계", "순액(차변-대변)"]), hide_index=True,
-                 use_container_width=True)
-    chart = key.set_index("구분")
-    st.bar_chart(to_chart_unit(chart, ["차변 합계", "대변 합계"]), stack=False, horizontal=True,
-                 x_label="구분", y_label=f"금액 ({CHART_UNIT_LABEL})")
+    st.subheader("상위 계정")
+    st.caption("업로드한 파일에 있는 계정을 기준으로 보여 줍니다. 업종이나 계정코드 체계를 가정하지 않으며, 특정 계정코드 "
+               "범위나 계정명으로 계정을 분류하지 않습니다.")
+    t1, t2 = st.columns(2)
+    top_measure = t1.selectbox("기준", TOP_MEASURES, key="analysis_top_measure",
+                               help="라인 금액 합계 = 그 계정 라인의 (차변 + 대변) 합계")
+    top_n = t2.number_input("표시할 계정 수", 5, 50, 10, key="analysis_top_n",
+                            help="화면 표시용 개수입니다. 탐지 기준이 아닙니다.")
+    top = top_accounts(df, top_measure, top_n)
+    top_money = ["차변 합계", "대변 합계", "라인 금액 합계"]
+    st.dataframe(money(top[["계정코드", "계정과목명", "라인 수", "전표 수", *top_money, "금액 비중(%)"]], top_money)
+                 .format("{:,.2f}", subset=["금액 비중(%)"], na_rep=""), hide_index=True, use_container_width=True)
+    # 차트 축은 글자 순서로 정렬되므로 순위 번호를 앞에 붙여 표와 같은 순서로 보이게 합니다.
+    chart = top.assign(계정=[f"{i:02d}. {c} {n}" for i, (c, n) in enumerate(zip(top["계정코드"], top["계정과목명"]), 1)])
+    chart = chart.set_index("계정")
+    if top_measure in top_money:
+        st.bar_chart(to_chart_unit(chart, [top_measure]), horizontal=True, x_label="계정",
+                     y_label=f"{top_measure} ({CHART_UNIT_LABEL})")
+    else:
+        st.bar_chart(chart[[top_measure]], horizontal=True, x_label="계정", y_label=f"{top_measure} (건)")
 
     st.subheader("계정별 월별 추이")
     labels = [f"{c} {n}" for c, n in zip(accounts["계정코드"], accounts["계정과목명"])]
-    default = next((i for i, g in enumerate(accounts["주요 계정 구분"]) if g == "원재료"), 0)
+    # 처음 선택: 라인 금액 합계가 가장 큰 계정
+    default = int(accounts["라인 금액 합계"].to_numpy().argmax()) if len(accounts) else 0
     chosen = st.selectbox("계정 선택", labels, index=default, key="analysis_account")
     code = accounts["계정코드"].iloc[labels.index(chosen)]
     row = accounts[accounts["계정코드"] == code].iloc[0]
@@ -412,8 +464,9 @@ with tab_account:
 
     st.subheader("전체 계정")
     st.caption("라인 금액 = 차변 + 대변 (한 라인에는 보통 한쪽만 있으므로 그 라인의 거래 금액). "
+               "금액 비중 = 라인 금액 합계 ÷ 전체 라인 금액 합계 × 100. "
                "계정과목명이 여러 개로 적힌 계정은 가장 많이 쓰인 이름 뒤에 '외 n개'를 붙였습니다.")
-    money_cols = ["차변 합계", "대변 합계", "순액(차변-대변)", "라인 금액 평균", "라인 금액 중앙값",
+    money_cols = ["차변 합계", "대변 합계", "순액(차변-대변)", "라인 금액 합계", "라인 금액 평균", "라인 금액 중앙값",
                   "라인 금액 최소", "라인 금액 최대"]
     st.dataframe(money(accounts, money_cols), hide_index=True, use_container_width=True)
     st.download_button("계정별 분석 CSV 내려받기",
@@ -430,47 +483,49 @@ with tab_month:
     st.caption("차변 합계와 대변 합계가 같은 달은 두 선이 겹쳐 하나로 보입니다. 거래가 없는 달도 0으로 표시합니다(비고: 거래 없음). 전표 수는 그 달에 라인이 있는 전표번호 수이며, "
                "여러 달에 걸친 전표는 각 달에 한 번씩 셉니다.")
 
+    st.subheader("회계연도별 요약")
+    fy_table = fiscal_year_summary(df)
+    st.dataframe(money(date_only(date_only(fy_table, "자료 시작일"), "자료 종료일"), ["차변 합계", "대변 합계"]),
+                 hide_index=True, use_container_width=True)
+    st.caption(f"{int(closing_month)}월 결산 기준입니다. 자료가 12개월에 못 미치는 회계연도는 비고에 적었으니, 연도 합계를 "
+               "그대로 비교하지 마세요. 전표 수는 그 회계연도에 라인이 있는 전표번호 수입니다.")
+
     st.subheader("전기·당기 같은 달 비교")
     years = fiscal_years(df)
     current_options = [y for y in years if y - 1 in years]
     if not current_options:
-        st.info(f"데이터에 있는 연도: {', '.join(map(str, years))}년. 전기·당기 비교에는 연속된 2개 연도의 자료가 "
+        st.info(f"데이터에 있는 회계연도: {', '.join(map(str, years))}. 전기·당기 비교에는 연속된 2개 회계연도의 자료가 "
                 "필요합니다.")
     else:
         f1, f2, f3 = st.columns(3)
         current = f1.selectbox("당기", current_options, index=len(current_options) - 1,
-                               format_func=lambda y: f"{y}년 (전기 {y - 1}년)", key="analysis_current")
+                               format_func=lambda y: f"{y} 회계연도 (전기 {y - 1})", key="analysis_current")
         prior = current - 1
         measure = f2.selectbox("비교 항목", MEASURES, index=MEASURES.index("차변 합계"), key="analysis_measure")
-        scopes = ["전체 계정"] + [f"[구분] {g}" for g, _ in KEY_ACCOUNT_GROUPS] + labels
+        scopes = ["전체 계정"] + labels
         scope = f3.selectbox("범위", scopes, key="analysis_scope")
-        if scope == "전체 계정":
-            codes = None
-        elif scope.startswith("[구분] "):
-            codes = accounts_in_group(df, scope.removeprefix("[구분] "))
-        else:
-            codes = [accounts["계정코드"].iloc[labels.index(scope)]]
+        codes = None if scope == "전체 계정" else [accounts["계정코드"].iloc[labels.index(scope)]]
 
         table = compare_years(df, prior, current, measure, codes)
         is_amount = measure in ("차변 합계", "대변 합계")
         months = table[table["월"] != "합계"].copy()
-        months.index = range(1, 13)
-        chart = months[["전기", "당기"]].rename(columns={"전기": f"{prior}년 (전기)", "당기": f"{current}년 (당기)"})
+        # 차트 가로축은 회계연도 월 순서(예: 3월 결산이면 4월부터). 축이 글자 순서로 정렬되므로 순번을 붙입니다.
+        months.index = [f"{n:02d}. {m}" for n, m in enumerate(months["월"], start=1)]
+        chart = months[["전기", "당기"]].rename(columns={"전기": f"{prior} 회계연도 (전기)",
+                                                       "당기": f"{current} 회계연도 (당기)"})
         if is_amount:
             chart = chart / CHART_UNIT
         st.bar_chart(chart, stack=False, x_label="월",
                      y_label=f"{measure} ({CHART_UNIT_LABEL if is_amount else '건'})")
         unit = "원" if is_amount else "건"
-        shown = table.rename(columns={"전기": f"전기 {prior}년 ({unit})", "당기": f"당기 {current}년 ({unit})",
+        shown = table.rename(columns={"전기": f"전기 {prior} 회계연도 ({unit})", "당기": f"당기 {current} 회계연도 ({unit})",
                                       "증감": f"증감 ({unit})"})
         st.dataframe(shown.style.format("{:,.0f}", subset=list(shown.columns[1:4]))
                      .format("{:,.1f}", subset=["증감률(%)"], na_rep=""),
                      hide_index=True, use_container_width=True)
-        st.caption("같은 달끼리 비교합니다. 증감 = 당기 - 전기, 증감률 = 증감 ÷ 전기 × 100. 전기 값이 0이면 증감률은 "
+        st.caption(f"회계연도의 같은 달끼리 비교합니다({fy_first}월부터 {fy_last}월 순서). 증감 = 당기 - 전기, 증감률 = 증감 ÷ 전기 × 100. 전기 값이 0이면 증감률은 "
                    "빈칸입니다. '자료 없음'은 그 해 그 달에 어떤 계정의 자료도 없다는 뜻으로, 거래가 0인 것과 "
                    "구분해서 봐야 합니다.")
-        if codes == []:
-            st.warning("선택한 구분에 해당하는 계정이 없어 모든 값이 0입니다.")
 
 
 # ---------------------------------------------------------------- 5. 검토 대상 거래 (R1~R6)
@@ -511,11 +566,6 @@ with st.sidebar:
     status_box = st.container()
     st.button("기본값으로 되돌리기", on_click=reset_detection_settings, key="det_reset", use_container_width=True)
 
-    with st.expander("공통: 결산일"):
-        closing_month = st.number_input("결산월", 1, 12, defaults.closing_month, key="det_closing_month")
-        closing_day = st.number_input("결산일", 1, 31, defaults.closing_day, key="det_closing_day",
-                                      help="그 달에 없는 날이면 그 달 말일로 맞춥니다(예: 2월 30일 → 2월 28일). "
-                                           "R3와 R4(c)의 회계연도에 씁니다.")
     with st.expander("R1 금액 분포"):
         on = {"R1": rule_switch(st, "R1")}
         r1_multiplier = st.number_input("R1 IQR 배수", 0.5, 10.0, defaults.r1_multiplier, 0.5, key="det_r1_mult")
@@ -722,6 +772,10 @@ with st.container(border=True):
         if rule_box("R4"):
             for note in det.r4_notes:
                 st.caption(f"참고: {note}")
+            fill = description_fill_rate(df)
+            if fill is not None and fill["적요 있는 라인 수"] == 0:
+                st.warning("적요 열은 연결되었지만 값이 모두 비어 있어 R4(d)는 평가하지 않았습니다(평가 불가). 모든 전표를 "
+                           "'적요 없음'으로 올리지 않기 위해서입니다. 적요가 다른 열에 있다면 열 연결을 확인해 주세요.")
             st.markdown("**조건별 전표 수**")
             st.dataframe(det.r4_counts, hide_index=True, use_container_width=True)
             st.caption("한 전표가 여러 조건에 해당할 수 있어 조건별 수의 합은 R4 전표 수보다 클 수 있습니다. 값은 앞뒤 공백만 빼고 "
@@ -829,7 +883,7 @@ def cached_export(_det, _result, _df, _notes, key):
 
 st.header("6. 결과 다운로드")
 export_key = (file_name, sheet, hashlib.sha256(data).hexdigest(), tuple(sorted(mapping.items())), single_items,
-              tuple(sorted(vars(settings).items())))
+              format_items, tuple(sorted(vars(settings).items())))
 xlsx_bytes, zip_bytes, export_time = cached_export(det, result, df, prep_notes, export_key)
 st.caption(f"위 5단계 화면과 같은 결과를 파일로 내려받습니다(다시 계산하지 않음). 지금 적용한 탐지 기준(기본값과 다른 항목 "
            f"{len(changed)}개, 꺼진 규칙: {', '.join(off_rules) if off_rules else '없음'})이 '적용 기준' 시트에 함께 남습니다. "
