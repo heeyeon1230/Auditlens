@@ -69,3 +69,37 @@ def suggest_mapping(file_columns):
                 used.add(match)
                 break
     return mapping
+
+
+# ---------------------------------------------------------------- 금액 형식
+# 분개장의 금액은 두 형식 중 하나로 받습니다. 어느 형식이든 검증 단계에서 차변금액·대변금액(debit, credit) 두 열로
+# 바꾸므로, 그 뒤의 분석·탐지·다운로드는 형식과 상관없이 같은 표를 씁니다.
+AMOUNT_TWO_COLUMNS = "차변·대변 두 열"
+AMOUNT_ONE_COLUMN = "금액 한 열 + 차대 구분 열"
+AMOUNT_FORMATS = [AMOUNT_TWO_COLUMNS, AMOUNT_ONE_COLUMN]
+
+# 금액 한 열 형식에서 연결하는 두 열 (표준 열 13개와 따로 둡니다)
+SINGLE_AMOUNT_LABELS = {"amount": "금액", "dc_flag": "차대 구분"}
+SINGLE_AMOUNT_ALIASES = {
+    "amount": ["amount", "금액", "거래금액", "전표금액", "분개금액"],
+    "dc_flag": ["dc_flag", "차대구분", "차대 구분", "차/대", "차대", "대차구분", "dr/cr", "d/c", "debit/credit"],
+}
+
+
+def suggest_single_amount(file_columns, used=()):
+    """금액 한 열 형식의 '금액'·'차대 구분' 열을 열 이름으로 추측합니다. 반환값: {"amount": 열 또는 None, "dc_flag": ...}
+
+    used: 이미 다른 표준 열에 연결된 파일 열(같은 열을 두 번 추측하지 않음).
+    """
+    normalized = {_normalize(c): c for c in file_columns}
+    taken = set(used)
+    found = {}
+    for key, aliases in SINGLE_AMOUNT_ALIASES.items():
+        found[key] = None
+        for alias in aliases:
+            match = normalized.get(_normalize(alias))
+            if match is not None and match not in taken:
+                found[key] = match
+                taken.add(match)
+                break
+    return found
