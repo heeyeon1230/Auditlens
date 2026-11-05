@@ -64,7 +64,8 @@ def test_샘플_12월_결산_기초_분석은_달력_연도(sample):
 
 def test_샘플_적요_입력률이_R4_처리_내역에_표시(sample):
     _, (_, _, det, tables) = sample
-    assert any(n.startswith("적요 입력률: 라인 9,324 / 9,326") for n in det.r4_notes)
+    assert ("적요 입력률: 라인 기준 99.98% (9,324 / 9,326라인), 전표 기준 99.98% (4,589 / 4,590전표). "
+            "적요가 빈 전표 1 / 4,590개.") in det.r4_notes
     assert det.r4_counts.set_index("조건").loc["(d) 적요 없음·키워드", "적용 여부"] == "적용"
 
 
@@ -201,4 +202,4 @@ def test_적요가_모두_빈_회사는_R4d_평가_불가(service):
     assert det.r4.empty  # 원천·유형·입력자 열도 없으므로 R4 전체 0개 (예전에는 전표 전부)
     notice = tables["안내"].astype(str)
     assert notice.apply(lambda col: col.str.contains("평가 불가 (적요 열의 값이 모두 비어 있음)", regex=False)).any().any()
-    assert notice.apply(lambda col: col.str.contains("적요 입력률: 라인 0 /", regex=False)).any().any()
+    assert notice.apply(lambda col: col.str.contains("라인 기준 0.00% (0 /", regex=False)).any().any()

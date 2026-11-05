@@ -521,7 +521,11 @@ def _fiscal_year_end(posting, s):
 
 
 def description_fill_rate(df):
-    """적요 입력률. 라인 기준(적요가 있는 라인 / 전체 라인)과 전표 기준(모든 라인의 적요가 빈 전표 수)을 돌려줍니다.
+    """적요 입력률을 돌려줍니다. 표시용이며 R4(d) 판단에는 쓰지 않습니다.
+
+    - 라인 기준: 적요가 입력된 라인 수 / 전체 라인 수
+    - 전표 기준: 적어도 한 라인에 적요가 입력된 전표 수 / 전체 전표 수
+    - 적요가 빈 전표: 모든 라인의 적요가 빈 전표 수(R4(d) '적요 없음'과 같은 기준)
 
     적요 열이 없으면 None입니다. 공백만 있는 값은 빈 값으로 봅니다.
     """
@@ -532,10 +536,12 @@ def description_fill_rate(df):
     vouchers = int(df["je_id"].nunique())
     blank_vouchers = int((~text.ne("").groupby(df["je_id"]).any()).sum()) if lines else 0
     rate = filled / lines if lines else 0.0
+    voucher_rate = (vouchers - blank_vouchers) / vouchers if vouchers else 0.0
     return {"라인 수": lines, "적요 있는 라인 수": filled, "적요 입력률": rate, "전표 수": vouchers,
-            "적요 없는 전표 수": blank_vouchers,
-            "문장": f"적요 입력률: 라인 {filled:,} / {lines:,} ({rate:.2%}). 모든 라인의 적요가 빈 전표 "
-                    f"{blank_vouchers:,} / {vouchers:,}개."}
+            "적요 없는 전표 수": blank_vouchers, "전표 기준 적요 입력률": voucher_rate,
+            "문장": f"적요 입력률: 라인 기준 {rate:.2%} ({filled:,} / {lines:,}라인), 전표 기준 {voucher_rate:.2%} "
+                    f"({vouchers - blank_vouchers:,} / {vouchers:,}전표). 적요가 빈 전표 {blank_vouchers:,} / "
+                    f"{vouchers:,}개."}
 
 
 def r4_manual_entries(df, settings=None):
