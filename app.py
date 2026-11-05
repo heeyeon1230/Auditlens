@@ -131,6 +131,10 @@ if info.get("encoding"):
 if info.get("sheet"):
     detail += f", 시트 '{info['sheet']}'"
 st.success(f"파일을 읽었습니다: {file_name} ({detail}) · {len(raw):,}행 × {len(raw.columns)}열")
+if info.get("trimmed"):
+    t = info["trimmed"]
+    st.info(f"CSV 데이터 행 끝에 머리글에 없는 빈 열이 있어 제거했습니다: 열 {t['before']}개 → {t['after']}개(머리글의 열 수). "
+            f"빈 열이 붙어 있던 행은 {t['rows']:,}개이며, 제거한 칸은 모두 빈 값이었습니다. 다른 값은 바꾸지 않았습니다.")
 if info.get("renamed"):
     st.info("이름이 같은 열이 있어 뒤의 열 이름에 번호를 붙였습니다(값은 그대로): "
             + ", ".join(f"'{old}' → '{new}'" for old, new in info["renamed"])

@@ -4,6 +4,7 @@
 형식 검사와 변환은 validation.py가 맡습니다.
 """
 
+import csv
 import io
 
 import pandas as pd
@@ -80,11 +81,17 @@ def _read_csv(data: bytes):
     last_error = None
     for encoding in CSV_ENCODINGS:
         try:
+            trailing = _trailing_columns(data.decode(encoding))
             # dtype=str: 계정코드 앞자리 0, 금액의 쉼표 등을 파일에 적힌 그대로 보존
+            # 행 끝의 빈 추가 칸이 있으면 머리글 열까지만 읽습니다(usecols). 추가 칸이 없으면 이전과 똑같이 읽습니다.
+            extra = {"usecols": list(range(trailing["after"]))} if trailing else {}
             df = pd.read_csv(io.BytesIO(data), dtype=str, encoding=encoding,
-                             keep_default_na=False, skipinitialspace=True)
+                             keep_default_na=False, skipinitialspace=True, **extra)
             _check_delimiter(df)
-            return df, {"format": "CSV", "encoding": encoding, "sheet": None}
+            info = {"format": "CSV", "encoding": encoding, "sheet": None}
+            if trailing:
+                info["trimmed"] = trailing
+            return df, info
         except UnicodeDecodeError as exc:
             last_error = exc
         except pd.errors.EmptyDataError as exc:
@@ -98,6 +105,44 @@ def _read_csv(data: bytes):
     raise LoadError(
         "CSV 파일의 글자 인코딩을 알 수 없습니다. UTF-8 또는 CP949(Excel 기본 'CSV' 저장)로 저장해 주세요."
     ) from last_error
+
+
+def _trailing_columns(text):
+    """데이터 행이 머리글보다 열(칸)이 많은지 확인합니다.
+
+    pandas는 모든 데이터 행 끝에 칸이 하나 더 있으면(예: 'J1,101,') 첫 열을 행 이름으로 써서 열이 한 칸씩 밀린 표를
+    오류 없이 만듭니다. 이를 막기 위해 읽기 전에 칸 수를 셉니다.
+    - 추가 칸이 없으면 None
+    - 추가 칸이 모두 비어 있으면 {"before": 가장 많은 칸 수, "after": 머리글 칸 수, "rows": 추가 칸이 있는 행 수}
+    - 추가 칸에 값이 하나라도 있으면 LoadError (어느 열이 어느 항목인지 알 수 없으므로 임의로 지우지 않음)
+    """
+    try:
+        rows = csv.reader(io.StringIO(text, newline=""), skipinitialspace=True)
+        header = next(rows, None)
+        if not header:
+            return None
+        n = len(header)
+        widest, n_rows, filled = n, 0, []
+        for number, row in enumerate(rows, start=2):  # 파일 행 번호: 머리글이 1행
+            if len(row) <= n:
+                continue
+            n_rows += 1
+            widest = max(widest, len(row))
+            if any(cell.strip() for cell in row[n:]):
+                filled.append(number)
+    except csv.Error:
+        return None  # 따옴표가 맞지 않는 파일 등은 pandas가 읽으면서 기존 오류 안내를 냅니다.
+    if not n_rows:
+        return None
+    if filled:
+        shown = ", ".join(f"{r}행" for r in filled[:5]) + (f" 외 {len(filled) - 5}개" if len(filled) > 5 else "")
+        raise LoadError(
+            f"CSV 파일의 열 구조가 맞지 않습니다. 머리글(1행)은 {n}개 열인데, 머리글보다 열이 많고 그 추가 열에 값이 들어 있는 "
+            f"행이 {len(filled)}개 있습니다(예: {shown}, 가장 많은 행은 {widest}개 열). 어느 값이 어느 열의 값인지 알 수 없어 "
+            "추가 열을 지우지 않고 읽기를 멈췄습니다. 수정 방법: 머리글에 빠진 열 이름을 추가하거나, 해당 행의 값을 고쳐 열 개수를 "
+            "머리글과 같게 맞춘 뒤 다시 올려 주세요. 쉼표가 들어간 값(예: 1,000)은 큰따옴표로 감싸야 합니다."
+        )
+    return {"before": widest, "after": n, "rows": n_rows}
 
 
 def _check_delimiter(df):
