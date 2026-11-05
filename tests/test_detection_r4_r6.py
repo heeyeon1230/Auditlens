@@ -10,7 +10,8 @@ import pandas as pd
 
 from auditlens.analysis import prepare
 from auditlens.detection import (
-    PRIORITY_GROUP, REVIEW_LABEL, SUPPORT_GROUP, SUPPORT_LABEL, DetectionSettings, period_vouchers, r4_manual_entries,
+    PRIORITY_GROUP, REVIEW_LABEL, SUPPORT_GROUP, SUPPORT_LABEL, DetectionSettings, description_fill_rate,
+    period_vouchers, r4_manual_entries,
     r5_new_vendors, r6_duplicates, run_detection,
 )
 from tests.test_detection import journal, pair
@@ -98,12 +99,81 @@ def test_r4d_blank_description_and_keywords():
     assert list(custom.index) == ["KW2"]
 
 
+# ---- 범용화 B: 적요 열 없음 · 전체 공란 · 부분 공란을 구분합니다.
+def test_r4d_적요_열이_없으면_검사_안_함():
+    entries = [pair(f"N{i}", date(2025, 3, 10), 100_000, source="자동") for i in range(5)]
+    table, notes, counts = r4(entries)
+    assert counts.loc["(d) 적요 없음·키워드", "적용 여부"] == "검사 안 함 (적요 열 없음)"
+    assert not any("적요 입력률" in n for n in notes)
+
+
+def test_r4d_적요가_모두_비면_평가_불가로_탐지하지_않음():
+    entries = [auto(f"N{i}", description="") for i in range(200)] + [auto("SP", description="   ")]
+    table, notes, counts = r4(entries)
+    assert table.empty  # 예전에는 201개 전표 모두 '(d) 적요 없음'
+    assert counts.loc["(d) 적요 없음·키워드", "적용 여부"] == "평가 불가 (적요 열의 값이 모두 비어 있음)"
+    assert counts.loc["(d) 적요 없음·키워드", "해당 전표 수"] == 0
+    assert "(d) 적요 없음·키워드: 평가 불가 (적요 열의 값이 모두 비어 있음)" in notes
+    assert ("적요 입력률: 라인 기준 0.00% (0 / 402라인), 전표 기준 0.00% (0 / 201전표). 적요가 빈 전표 201 / 201개."
+            in notes)
+
+
+def test_r4d_적요가_모두_비어도_다른_R4_조건은_그대로():
+    entries = [auto(f"N{i}", description="") for i in range(200)] + [auto("MAN", source="수기", description="")]
+    table, _, counts = r4(entries)
+    assert list(table.index) == ["MAN"] and table.loc["MAN", "해당 조건"] == "(a) 수기·조정 전표"
+    assert counts.loc["(a) 수기·조정 전표", "적용 여부"] == "적용"
+
+
+def test_r4d_일부만_비면_기존_규칙대로_탐지하고_입력률_표시():
+    entries = [auto(f"N{i}") for i in range(198)] + [auto("B1", description=""), auto("B2", description=None)]
+    table, notes, counts = r4(entries)
+    assert set(table.index) == {"B1", "B2"} and (table["해당 조건"] == "(d) 적요 없음").all()
+    assert counts.loc["(d) 적요 없음·키워드", "적용 여부"] == "적용"
+    assert ("적요 입력률: 라인 기준 99.00% (396 / 400라인), 전표 기준 99.00% (198 / 200전표). 적요가 빈 전표 2 / 200개."
+            in notes)
+
+
+def test_r4d_한_라인만_적요가_있어도_전표는_적요_있음():
+    one = ("HALF", date(2025, 3, 10), [("X100", "출장비", 100, 0), ("Y900", "현금성자산", 0, 100)], {})
+    df = journal([auto(f"N{i}") for i in range(10)] + [one])
+    df.loc[(df["je_id"] == "HALF") & (df["account_code"] == "Y900"), "description"] = "출장 정산"
+    table, notes, _ = r4_manual_entries(df, DetectionSettings())
+    assert "HALF" not in set(table["전표번호"])
+    rate = description_fill_rate(df)
+    assert rate["적요 있는 라인 수"] == 21 and rate["적요 없는 전표 수"] == 0
+
+
+def test_적요_입력률_라인_기준과_전표_기준():
+    # 10개 전표(2라인씩): 6개는 모두 입력, 3개는 모두 공란, 1개는 한 라인만 공란
+    entries = [auto(f"F{i}") for i in range(6)] + [auto(f"B{i}", description="") for i in range(3)]
+    entries.append(("HALF", date(2025, 3, 10), [("X100", "출장비", 100_000, 0), ("Y900", "현금성자산", 0, 100_000)], {}))
+    df = journal(entries)
+    df.loc[(df["je_id"] == "HALF") & (df["account_code"] == "X100"), "description"] = "출장 정산"
+    rate = description_fill_rate(df)
+    assert rate["적요 있는 라인 수"] == 13 and rate["라인 수"] == 20 and f"{rate['적요 입력률']:.2%}" == "65.00%"
+    assert rate["전표 수"] == 10 and rate["적요 없는 전표 수"] == 3
+    assert f"{rate['전표 기준 적요 입력률']:.2%}" == "70.00%"
+    assert rate["문장"] == ("적요 입력률: 라인 기준 65.00% (13 / 20라인), 전표 기준 70.00% (7 / 10전표). "
+                          "적요가 빈 전표 3 / 10개.")
+    table, notes, counts = r4_manual_entries(df, DetectionSettings())
+    assert rate["문장"] in notes
+    # R4(d) 탐지는 그대로: 모든 라인이 빈 3개만 '적요 없음'
+    assert set(table.loc[table["해당 조건"].str.contains("(d)", regex=False), "전표번호"]) == {"B0", "B1", "B2"}
+
+
+def test_적요가_모두_비면_두_입력률_모두_0():
+    rate = description_fill_rate(journal([auto(f"N{i}", description="") for i in range(5)]))
+    assert rate["적요 입력률"] == 0 and rate["전표 기준 적요 입력률"] == 0 and rate["적요 없는 전표 수"] == 5
+    assert description_fill_rate(journal([pair("N0", date(2025, 3, 10), 100)])) is None  # 적요 열 없음
+
+
 def test_r4_turns_off_sub_conditions_without_columns():
     entries = [pair(f"N{i}", date(2025, 3, 10), 100_000) for i in range(5)]  # 선택 열이 하나도 없음
     table, notes, counts = r4(entries)
     assert table.empty
     assert counts["적용 여부"].str.startswith("검사 안 함").all()
-    assert len(notes) == 4
+    assert len(notes) == 4  # 적요 열이 없으므로 적요 입력률 문장도 없음
 
 
 def test_r4_multiple_conditions_are_all_listed():

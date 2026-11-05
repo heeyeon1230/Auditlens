@@ -49,7 +49,7 @@ def test_빈_표는_빈_결과():
     assert len(A.monthly_summary(df)) == 0
     assert A.fiscal_years(df) == []
     assert A.default_comparison_years(df) == (None, None)
-    assert (A.key_account_summary(df)["라인 수"] == 0).all()
+    assert len(A.top_accounts(df)) == 0 and len(A.fiscal_year_summary(df)) == 0
 
 
 def test_None_입력도_빈_결과():
@@ -154,33 +154,54 @@ def test_계정과목명이_여러_개면_표시():
     assert A.account_summary(df).loc[0, "계정과목명"] == "원재료 외 1개"
 
 
-@pytest.mark.parametrize("code,name,expected", [
-    ("131", "원재료", "원재료"),
-    ("133", "재공품", "재공품"),
-    ("135", "제품", "제품"),
-    ("455", "제품매출원가", "매출원가"),
-    ("404", "제품매출", "매출"),
-    ("501", "원재료비", "제조원가"),
-    ("599", "기타제조경비", "제조원가"),
-    ("108", "외상매출금", None),
-    ("802", "급여", None),
-    ("600", "도급원가", None),
-    ("A01", "기타", None),
-])
-def test_제조업_주요_계정_구분(code, name, expected):
-    assert A.key_account_group(code, name) == expected
+# 제조업 주요 계정 구분(원재료·재공품·제품·매출원가·매출, 계정코드 500~599 = 제조원가)은 범용화 작업에서 없앴습니다.
+# 아래 테스트는 그 대신 들어간 일반 계정별 분석(업로드한 계정 기준)을 확인합니다.
+def test_계정별_표에_제조업_분류가_없음(basic):
+    table = A.account_summary(basic)
+    assert "주요 계정 구분" not in table.columns
+    assert not hasattr(A, "KEY_ACCOUNT_GROUPS") and not hasattr(A, "key_account_group")
+    assert list(table.columns) == A.ACCOUNT_COLUMNS
 
 
-def test_주요_계정_요약은_모든_구분을_표시(basic):
-    table = A.key_account_summary(basic).set_index("구분")
-    assert list(table.index) == [g for g, _ in A.KEY_ACCOUNT_GROUPS]
-    assert table.loc["원재료", "차변 합계"] == 2500
-    assert table.loc["매출", "대변 합계"] == 5000
-    assert table.loc["매출원가", "차변 합계"] == 3000
-    assert table.loc["제품", "대변 합계"] == 3000
-    assert table.loc["재공품", "해당 계정"] == "(해당 계정 없음)"
-    assert table.loc["재공품", "라인 수"] == 0
-    assert A.accounts_in_group(basic, "원재료") == ["131"]
+def test_상위_계정은_고른_기준의_큰_순서(basic):
+    accounts = A.account_summary(basic).set_index("계정코드")
+    top = A.top_accounts(basic, "라인 금액 합계", 3)
+    assert len(top) == 3
+    assert list(top["라인 금액 합계"]) == sorted(accounts["라인 금액 합계"], reverse=True)[:3]
+    assert A.top_accounts(basic, "라인 수", 100)["라인 수"].is_monotonic_decreasing
+    assert len(A.top_accounts(basic, "라인 수", 100)) == len(accounts)
+    with pytest.raises(ValueError):
+        A.top_accounts(basic, "평균")
+
+
+def test_금액_비중과_라인_금액_합계(basic):
+    table = A.account_summary(basic)
+    assert table["라인 금액 합계"].sum() == basic["line_amount"].sum()
+    assert abs(table["금액 비중(%)"].sum() - 100) < 0.1
+    row = table.set_index("계정코드").loc["131"]
+    assert row["라인 금액 합계"] == row["차변 합계"] + row["대변 합계"]
+
+
+def test_다른_업종의_계정코드_체계도_같은_방식으로_집계():
+    # 서비스업을 가정한 6자리 코드. '520 급여'처럼 예전에 제조원가로 분류되던 코드도 특별히 다루지 않음
+    rows = [("J1", "2025-01-01", "511000", "급여", 300, 0), ("J1", "2025-01-01", "103000", "보통예금", 0, 300),
+            ("J2", "2025-01-02", "520", "급여", 50, 0), ("J2", "2025-01-02", "103000", "보통예금", 0, 50)]
+    df, _ = A.prepare(make_clean(rows))
+    table = A.account_summary(df).set_index("계정코드")
+    assert list(table.index) == ["520", "103000", "511000"]  # 숫자 순서
+    assert table.loc["103000", "대변 합계"] == 350 and table.loc["511000", "전표 수"] == 1
+    assert list(A.top_accounts(df, "라인 금액 합계", 1)["계정코드"]) == ["103000"]
+
+
+def test_계정_그룹_구조는_사용자가_정한_그룹으로만_묶음(basic):
+    groups = {"131": "재고", "135": "재고"}
+    table = A.account_summary(basic, groups).set_index("계정코드")
+    assert table.loc["131", "계정 그룹"] == "재고" and table.loc["404", "계정 그룹"] == ""
+    summary = A.account_group_summary(basic, groups).set_index("계정 그룹")
+    assert summary.loc["재고", "계정 수"] == 2
+    assert summary.loc["재고", "차변 합계"] == table.loc[["131", "135"], "차변 합계"].sum()
+    assert summary.loc["(그룹 없음)", "계정 수"] == len(table) - 2
+    assert A.accounts_in_group(groups, "재고") == ["131", "135"]
 
 
 # ---------------------------------------------------------------- 월별
@@ -289,31 +310,18 @@ def test_계정코드가_빈_행은_검증에서_제외되어_분류되지_않�
     assert any(i["코드"] == "V5" and "계정코드" in i["문제"] for i in result.issues)
     df, _ = A.prepare(result.clean)
     assert list(A.account_summary(df)["계정코드"]) == ["251"]
-    assert A.key_account_summary(df).set_index("구분").loc["원재료", "라인 수"] == 0
 
 
-def test_계정과목명이_계정코드보다_먼저_적용됨():
-    rows = [
-        ("J1", "2025-01-01", "501", "원재료", 100, 0),  # 제조원가 범위 코드지만 이름이 '원재료'
-        ("J2", "2025-01-02", "131", "원재료비", 100, 0),  # 원재료 코드지만 이름이 '원재료비'
-        ("J3", "2025-01-03", "533", "", 100, 0),  # 이름이 비어 있으면 코드로만 판단
-        ("J4", "2025-01-04", "5100", "원재료비", 100, 0),  # 4자리 코드는 500~599가 아님
-    ]
-    df, _ = A.prepare(make_clean(rows))
-    groups = dict(zip(A.account_summary(df)["계정코드"], A.account_summary(df)["주요 계정 구분"]))
-    assert groups == {"131": "", "501": "원재료", "533": "제조원가", "5100": ""}
-
-
-def test_계정과목명이_여러_개면_대표_이름으로_분류():
+def test_계정과목명이_여러_개면_대표_이름으로_표시():
     # 같은 횟수면 파일에서 먼저 나온 이름이 대표 이름입니다.
     rows = [("J1", "2025-01-01", "135", "제품", 100, 0), ("J1", "2025-01-01", "135", "완제품", 0, 100)]
     df, _ = A.prepare(make_clean(rows))
     row = A.account_summary(df).iloc[0]
-    assert row["계정과목명"] == "제품 외 1개" and row["주요 계정 구분"] == "제품"
+    assert row["계정과목명"] == "제품 외 1개"
     rows = [("J1", "2025-01-01", "135", "완제품", 100, 0), ("J1", "2025-01-01", "135", "제품", 0, 100)]
     df, _ = A.prepare(make_clean(rows))
     row = A.account_summary(df).iloc[0]
-    assert row["계정과목명"] == "완제품 외 1개" and row["주요 계정 구분"] == ""
+    assert row["계정과목명"] == "완제품 외 1개"
 
 
 def test_전기_자료가_전혀_없는_연도와_비교():

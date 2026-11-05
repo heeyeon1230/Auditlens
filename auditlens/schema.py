@@ -30,20 +30,33 @@ OPTIONAL_COLUMNS = [
 ]
 
 # 열 이름 자동 연결용 별칭. 비교할 때는 공백·밑줄을 지우고 소문자로 바꿔서 비교합니다.
+# 한글 이름, 흔히 쓰는 영문 ERP 이름, SAP 필드명(BELNR 등)을 넣었습니다. 실제 ERP 출력 파일로 확인한 목록은 아니며,
+# 자동 연결이 틀리거나 안 되면 화면의 열 연결에서 직접 고르면 됩니다. 'document date'(증빙일)는 회계처리일과 다르므로
+# 넣지 않았습니다.
 COLUMN_ALIASES = {
-    "je_id": ["je_id", "전표번호", "전표no", "전표 번호", "journal id", "journal_id", "entry id", "document no"],
-    "posting_date": ["posting_date", "회계처리일", "회계일자", "전기일", "전표일자", "일자", "posting date", "gl date"],
-    "account_code": ["account_code", "계정코드", "계정 코드", "account code", "gl account"],
-    "account_name": ["account_name", "계정과목명", "계정과목", "계정명", "account name"],
-    "debit": ["debit", "차변금액", "차변", "debit amount", "dr"],
-    "credit": ["credit", "대변금액", "대변", "credit amount", "cr"],
-    "entry_date": ["entry_date", "입력일시", "입력일", "등록일", "entry date", "created date"],
-    "description": ["description", "적요", "내용", "memo"],
-    "vendor": ["vendor", "거래처", "거래처명", "customer/vendor", "partner"],
-    "source": ["source", "전표원천", "전표 원천(자동/수기)", "원천", "입력구분"],
-    "je_type": ["je_type", "전표유형", "전표 유형", "entry type"],
-    "created_by": ["created_by", "입력자", "작성자", "created by", "user"],
-    "approved_by": ["approved_by", "승인자", "approved by", "approver"],
+    "je_id": ["je_id", "전표번호", "전표no", "전표 번호", "journal id", "journal_id", "entry id", "document no",
+              "전표no.", "전표id", "분개번호", "document number", "document no.", "doc no", "doc no.", "voucher no",
+              "voucher number", "journal entry", "journal entry number", "je number", "entry number", "belnr"],
+    "posting_date": ["posting_date", "회계처리일", "회계일자", "전기일", "전표일자", "일자", "posting date", "gl date",
+                     "전기일자", "회계일", "전표일", "post date", "accounting date", "gl posting date", "budat"],
+    "account_code": ["account_code", "계정코드", "계정 코드", "account code", "gl account",
+                     "계정과목코드", "계정번호", "account", "account number", "account no", "gl account number",
+                     "g/l account", "hkont", "saknr"],
+    "account_name": ["account_name", "계정과목명", "계정과목", "계정명", "account name",
+                     "계정과목명칭", "account description", "gl account name", "g/l account name", "account title"],
+    "debit": ["debit", "차변금액", "차변", "debit amount", "dr", "차변 금액", "dr amount", "debit (krw)"],
+    "credit": ["credit", "대변금액", "대변", "credit amount", "cr", "대변 금액", "cr amount", "credit (krw)"],
+    "entry_date": ["entry_date", "입력일시", "입력일", "등록일", "entry date", "created date",
+                   "입력일자", "등록일시", "작성일", "created on", "entry datetime", "input date", "cpudt"],
+    "description": ["description", "적요", "내용", "memo", "적요내용", "비고", "line description", "text", "narration",
+                    "explanation", "sgtxt"],
+    "vendor": ["vendor", "거래처", "거래처명", "customer/vendor", "partner", "거래처코드", "vendor name",
+               "customer name", "counterparty", "business partner"],
+    "source": ["source", "전표원천", "전표 원천(자동/수기)", "원천", "입력구분", "journal source", "source type"],
+    "je_type": ["je_type", "전표유형", "전표 유형", "entry type", "전표구분", "document type", "journal type", "blart"],
+    "created_by": ["created_by", "입력자", "작성자", "created by", "user", "입력사용자", "entered by", "posted by",
+                   "user name", "usnam"],
+    "approved_by": ["approved_by", "승인자", "approved by", "approver", "승인사용자", "approver name"],
 }
 
 
@@ -81,8 +94,10 @@ AMOUNT_FORMATS = [AMOUNT_TWO_COLUMNS, AMOUNT_ONE_COLUMN]
 # 금액 한 열 형식에서 연결하는 두 열 (표준 열 13개와 따로 둡니다)
 SINGLE_AMOUNT_LABELS = {"amount": "금액", "dc_flag": "차대 구분"}
 SINGLE_AMOUNT_ALIASES = {
-    "amount": ["amount", "금액", "거래금액", "전표금액", "분개금액"],
-    "dc_flag": ["dc_flag", "차대구분", "차대 구분", "차/대", "차대", "대차구분", "dr/cr", "d/c", "debit/credit"],
+    "amount": ["amount", "금액", "거래금액", "전표금액", "분개금액", "amount (krw)", "local amount", "line amount",
+               "dmbtr"],
+    "dc_flag": ["dc_flag", "차대구분", "차대 구분", "차/대", "차대", "대차구분", "dr/cr", "d/c", "debit/credit",
+                "debit/credit indicator", "dc indicator", "shkzg"],
 }
 
 

@@ -72,7 +72,9 @@ RULES = {
                 "키워드(기본: 수정, 조정, 오류, 임시)를 포함.",
         "한계": "'수기'를 나타내는 값은 ERP마다 달라 사용자가 골라야 합니다. 작은 회사는 입력자와 승인자가 같은 것이 일상일 수 "
                 "있습니다. 평소 전표가 적은 정상 사용자(배치 계정, 결산 담당)도 (c)에 걸립니다. 키워드는 표현이 다양해 놓치는 "
-                "것이 많고 정상 적요에도 쓰입니다. 열이 없는 세부 조건은 검사하지 않습니다.",
+                "것이 많고 정상 적요에도 쓰입니다. 열이 없는 세부 조건은 검사하지 않습니다. 적요 열은 있지만 값이 모두 비어 "
+                "있으면 (d)는 평가 불가로 두고 탐지하지 않습니다. 적요를 일부만 쓰는 회사는 (d) '적요 없음'이 많아질 수 있으니 "
+                "적요 입력률을 함께 보세요.",
     },
     "R5": {
         "이름": "신규 거래처·신규 계정 조합",
@@ -518,6 +520,30 @@ def _fiscal_year_end(posting, s):
     return _closing_for(posting.date(), s)
 
 
+def description_fill_rate(df):
+    """적요 입력률을 돌려줍니다. 표시용이며 R4(d) 판단에는 쓰지 않습니다.
+
+    - 라인 기준: 적요가 입력된 라인 수 / 전체 라인 수
+    - 전표 기준: 적어도 한 라인에 적요가 입력된 전표 수 / 전체 전표 수
+    - 적요가 빈 전표: 모든 라인의 적요가 빈 전표 수(R4(d) '적요 없음'과 같은 기준)
+
+    적요 열이 없으면 None입니다. 공백만 있는 값은 빈 값으로 봅니다.
+    """
+    if "description" not in df:
+        return None
+    text = _text(df["description"])
+    lines, filled = int(len(df)), int(text.ne("").sum())
+    vouchers = int(df["je_id"].nunique())
+    blank_vouchers = int((~text.ne("").groupby(df["je_id"]).any()).sum()) if lines else 0
+    rate = filled / lines if lines else 0.0
+    voucher_rate = (vouchers - blank_vouchers) / vouchers if vouchers else 0.0
+    return {"라인 수": lines, "적요 있는 라인 수": filled, "적요 입력률": rate, "전표 수": vouchers,
+            "적요 없는 전표 수": blank_vouchers, "전표 기준 적요 입력률": voucher_rate,
+            "문장": f"적요 입력률: 라인 기준 {rate:.2%} ({filled:,} / {lines:,}라인), 전표 기준 {voucher_rate:.2%} "
+                    f"({vouchers - blank_vouchers:,} / {vouchers:,}전표). 적요가 빈 전표 {blank_vouchers:,} / "
+                    f"{vouchers:,}개."}
+
+
 def r4_manual_entries(df, settings=None):
     """R4. 전표 단위로 (a) 수기·조정 값, (b) 입력자=승인자, (c) 드문 입력자, (d) 적요 없음·키워드를 봅니다.
 
@@ -535,11 +561,15 @@ def r4_manual_entries(df, settings=None):
         else ("검사 안 함 (전표 원천·유형 열 없음)" if not (has["source"] or has["je_type"]) else "검사 안 함 (선택한 값 없음)"),
         "(b) 입력자 = 승인자": "적용" if has["created_by"] and has["approved_by"] else "검사 안 함 (입력자 또는 승인자 열 없음)",
         "(c) 드문 입력자": "적용" if has["created_by"] else "검사 안 함 (입력자 열 없음)",
-        "(d) 적요 없음·키워드": "적용" if "description" in df else "검사 안 함 (적요 열 없음)",
+        # (d) 적요 열이 있어도 값이 모두 비어 있으면 '적요 없음'이 모든 전표에 해당하게 되므로 평가 불가로 둡니다.
+        "(d) 적요 없음·키워드": ("적용" if has["description"] else "평가 불가 (적요 열의 값이 모두 비어 있음)")
+        if "description" in df else "검사 안 함 (적요 열 없음)",
     }
     for cond, state in applied.items():
         if state != "적용":
             notes.append(f"{cond}: {state}")
+    if "description" in df:
+        notes.append(description_fill_rate(df)["문장"])
 
     info = _voucher_frame(df)
     values = {c: _values_by_voucher(df, c) for c in ["source", "je_type", "created_by", "approved_by", "description"]}
