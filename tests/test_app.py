@@ -236,3 +236,38 @@ def test_결과_다운로드_구역과_버튼():
     assert "다음 개발 단위" not in sidebar and "6. 결과 다운로드" in sidebar
     sheets = [d.value for d in at.dataframe if "Excel 시트" in d.value.columns][0]
     assert sheets["Excel 시트"].iloc[0] == "안내"
+
+
+def _single_amount_csv():
+    """금액 한 열 + 차대 구분(D/C) 형식의 작은 가상 분개장(서비스업 가정, 실제 회사 자료 아님)."""
+    lines = ["전표번호,회계처리일,계정코드,계정과목명,구분,금액"]
+    for i in range(40):
+        day = f"2025-{1 + i % 12:02d}-{10 + i % 15:02d}"
+        lines += [f"S{i},{day},6100,교육훈련비,D,{200000 + i * 1000}", f"S{i},{day},1010,현금,C,{200000 + i * 1000}"]
+    lines += ["BIG,2025-06-11,6100,교육훈련비,D,90000000", "BIG,2025-06-11,1010,현금,C,90000000", "X1,2025-07-01,6100,교육훈련비,,500"]
+    return "\n".join(lines).encode("utf-8")
+
+
+def test_금액_한_열_형식_업로드와_구분값_연결():
+    at = AppTest.from_file(APP, default_timeout=180).run()
+    at.radio[0].set_value("내 파일 업로드").run()
+    at.file_uploader[0].upload("한열형식.csv", _single_amount_csv(), "text/csv").run()
+    assert not at.exception
+    fmt = [r for r in at.radio if r.label == "금액 형식"][0]
+    assert fmt.value == "차변·대변 두 열"  # 기본은 기존 형식 그대로
+    fmt.set_value("금액 한 열 + 차대 구분 열").run()
+    labels = [s.label for s in at.selectbox]
+    assert "금액 *" in labels and "차대 구분 *" in labels and "차변금액 *" not in labels
+    [s for s in at.selectbox if s.label == "차대 구분 *"][0].select("구분").run()
+    # 구분값을 고르기 전에는 분석을 시작하지 않음
+    assert any("분석을 시작할 수 없습니다" in e.value for e in at.error)
+    sides = {s.label: s for s in at.selectbox if s.label.startswith("'")}
+    assert set(sides) == {"'D' (41행)", "'C' (41행)"}
+    sides["'D' (41행)"].select("차변").run()
+    [s for s in at.selectbox if s.label == "'C' (41행)"][0].select("대변").run()
+    assert not at.exception and not at.error
+    metrics = {m.label: m.value for m in at.metric}
+    assert metrics["제외 행"] == "1"  # 구분이 빈 X1 행
+    assert any("차대 구분 값이 비어 있는 행이 1개" in w.value for w in at.warning)
+    assert metrics["R1 라인"] == "2"  # BIG 전표의 차변·대변 라인 (두 열 형식 같은 자료의 기존 테스트와 같음)
+    assert any(h.value == "6. 결과 다운로드" for h in at.header)

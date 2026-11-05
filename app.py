@@ -26,10 +26,15 @@ from auditlens.sample_data import (
     COMPANY_NAME, CURRENT_YEAR, FICTIONAL_NOTICE, PRIOR_YEAR, generate_error_example,
     generate_sample_journal, journal_to_csv_bytes, journal_to_excel_bytes,
 )
-from auditlens.schema import COLUMN_LABELS, OPTIONAL_COLUMNS, REQUIRED_COLUMNS, suggest_mapping
-from auditlens.validation import ERROR, INFO, WARNING, validate_journal
+from auditlens.schema import (
+    AMOUNT_FORMATS, AMOUNT_ONE_COLUMN, AMOUNT_TWO_COLUMNS, COLUMN_LABELS, OPTIONAL_COLUMNS, REQUIRED_COLUMNS,
+    SINGLE_AMOUNT_LABELS, suggest_mapping, suggest_single_amount,
+)
+from auditlens.validation import CREDIT_SIDE, DEBIT_SIDE, ERROR, INFO, WARNING, dc_flag_key, dc_flag_values, validate_journal
 
 NOT_SELECTED = "(선택 안 함)"
+NOT_ASSIGNED = "지정 안 함"
+MAX_DC_VALUES = 20  # 차대 구분 열의 서로 다른 값이 이보다 많으면 구분 열이 아닐 가능성이 커 값 연결 칸을 만들지 않습니다.
 SAMPLE_FILE_NAME = f"가상데이터_분개장_{PRIOR_YEAR}_{CURRENT_YEAR}.csv"
 
 st.set_page_config(page_title="AuditLens", page_icon="🔍", layout="wide")
@@ -48,8 +53,10 @@ def cached_read(file_name, data, sheet):
 
 
 @st.cache_data(show_spinner="데이터를 검증하는 중입니다...")
-def cached_validate(raw, mapping_items):
-    return validate_journal(raw, dict(mapping_items))
+def cached_validate(raw, mapping_items, single_items=None):
+    single = None if single_items is None else {"amount": single_items[0], "dc_flag": single_items[1],
+                                                "sides": dict(single_items[2])}
+    return validate_journal(raw, dict(mapping_items), single)
 
 
 # ---------------------------------------------------------------- 머리말
@@ -131,9 +138,28 @@ st.write("파일의 열이 어떤 항목인지 연결합니다. 열 이름을 �
          "**\\*** 표시는 필수 항목입니다.")
 suggested = suggest_mapping(raw.columns)
 options = [NOT_SELECTED] + list(raw.columns)
+# 금액 형식: 기본은 차변·대변 두 열입니다. 차변·대변 열을 찾지 못했고 금액·차대 구분 열 이름이 보일 때만 한 열 형식을 먼저 고릅니다.
+single_guess = suggest_single_amount(raw.columns, [v for v in suggested.values() if v])
+guess_one = not (suggested["debit"] and suggested["credit"]) and all(single_guess.values())
+amount_format = st.radio(
+    "금액 형식", AMOUNT_FORMATS, index=AMOUNT_FORMATS.index(AMOUNT_ONE_COLUMN if guess_one else AMOUNT_TWO_COLUMNS),
+    horizontal=True, key=f"amount_format_{file_name}_{sheet}",
+    help="차변금액·대변금액이 따로 있으면 '두 열', 금액 한 열과 차변·대변을 나타내는 구분 열이 있으면 '한 열'을 고릅니다. "
+         "어느 형식이든 프로그램 안에서는 차변금액·대변금액 두 열로 바꿔 분석합니다.")
+single_mode = amount_format == AMOUNT_ONE_COLUMN
 mapping = {}
+single_cols = {}
+fields = [c for c in REQUIRED_COLUMNS if not (single_mode and c in ("debit", "credit"))]
+fields += list(SINGLE_AMOUNT_LABELS) if single_mode else []
 cols = st.columns(3)
-for n, std_col in enumerate(REQUIRED_COLUMNS + OPTIONAL_COLUMNS):
+for n, std_col in enumerate(fields + OPTIONAL_COLUMNS):
+    if std_col in SINGLE_AMOUNT_LABELS:  # 금액 한 열 형식의 '금액'·'차대 구분'
+        default = single_guess.get(std_col)
+        choice = cols[n % 3].selectbox(f"{SINGLE_AMOUNT_LABELS[std_col]} *", options,
+                                       index=options.index(default) if default in options else 0,
+                                       key=f"map_single_{std_col}_{file_name}_{sheet}")
+        single_cols[std_col] = None if choice == NOT_SELECTED else choice
+        continue
     required = std_col in REQUIRED_COLUMNS
     label = f"{COLUMN_LABELS[std_col]}{' *' if required else ''}"
     default = suggested.get(std_col)
@@ -142,6 +168,33 @@ for n, std_col in enumerate(REQUIRED_COLUMNS + OPTIONAL_COLUMNS):
         key=f"map_{std_col}_{file_name}_{sheet}",
     )
     mapping[std_col] = None if choice == NOT_SELECTED else choice
+if single_mode:
+    mapping["debit"] = mapping["credit"] = None
+
+single_items = None
+if single_mode:
+    sides = {}
+    flag_col = single_cols.get("dc_flag")
+    if flag_col:
+        with st.container(border=True):
+            st.markdown(f"**차대 구분 값 연결** · '{flag_col}' 열에 있는 값마다 차변인지 대변인지 골라 주세요.")
+            st.caption("회사·ERP마다 표기(예: 차변/대변, D/C, 1/2)가 달라 프로그램이 추측하지 않습니다. '지정 안 함'으로 둔 값의 "
+                       "행은 분석에서 제외되고 검증 결과에 표시됩니다. 금액의 부호는 바꾸지 않습니다.")
+            values = dc_flag_values(raw, flag_col)
+            n_blank = int((raw[flag_col].map(dc_flag_key) == "").sum())
+            if len(values) > MAX_DC_VALUES:
+                st.error(f"'{flag_col}' 열에 서로 다른 값이 {len(values):,}가지 있어 차대 구분 열이 아닌 것 같습니다. "
+                         "'차대 구분'에 차변·대변을 나타내는 열을 선택해 주세요.")
+            else:
+                vcols = st.columns(3)
+                for n, (value, count) in enumerate(values):
+                    pick = vcols[n % 3].selectbox(f"'{value}' ({count:,}행)", [NOT_ASSIGNED, DEBIT_SIDE, CREDIT_SIDE],
+                                                  key=f"dc_side_{file_name}_{sheet}_{flag_col}_{value}")
+                    if pick != NOT_ASSIGNED:
+                        sides[value] = pick
+            if n_blank:
+                st.caption(f"구분 값이 비어 있는 행 {n_blank:,}개는 차변·대변을 알 수 없어 분석에서 제외됩니다.")
+    single_items = (single_cols.get("amount"), flag_col, tuple(sorted(sides.items())))
 missing_optional = [COLUMN_LABELS[c] for c in OPTIONAL_COLUMNS if not mapping[c]]
 if missing_optional:
     st.caption("연결하지 않은 선택 항목: " + ", ".join(missing_optional)
@@ -149,7 +202,7 @@ if missing_optional:
 
 # ---------------------------------------------------------------- 3. 데이터 검증
 st.header("3. 데이터 검증")
-result = cached_validate(raw, tuple(sorted(mapping.items())))
+result = cached_validate(raw, tuple(sorted(mapping.items())), single_items)
 table = result.issues_table()
 n_err = int((table["등급"] == ERROR).sum())
 n_warn = int((table["등급"] == WARNING).sum())
@@ -191,7 +244,9 @@ with st.expander("검증 항목 설명"):
         "- **V8 전표별 차대 균형**: 같은 전표번호의 차변 합계와 대변 합계가 같은지(1원 이하 차이 허용)\n"
         "- **V9 중복 행**: 모든 열의 값이 같은 행이 있는지\n"
         "- **V10 분석 기간**: 회계처리일 범위와 차변·대변 합계\n"
-        "- **V11 계정명 일치**: 계정코드 하나에 계정과목명이 하나인지"
+        "- **V11 계정명 일치**: 계정코드 하나에 계정과목명이 하나인지\n"
+        "- **V12 차대 구분**(금액 한 열 형식만): 차변·대변으로 지정한 구분 값이 있는지, 구분 값이 비었거나 지정하지 않은 "
+        "값인 행(분석에서 제외)"
     )
 
 if result.excluded_rows:
@@ -773,7 +828,7 @@ def cached_export(_det, _result, _df, _notes, key):
 
 
 st.header("6. 결과 다운로드")
-export_key = (file_name, sheet, hashlib.sha256(data).hexdigest(), tuple(sorted(mapping.items())),
+export_key = (file_name, sheet, hashlib.sha256(data).hexdigest(), tuple(sorted(mapping.items())), single_items,
               tuple(sorted(vars(settings).items())))
 xlsx_bytes, zip_bytes, export_time = cached_export(det, result, df, prep_notes, export_key)
 st.caption(f"위 5단계 화면과 같은 결과를 파일로 내려받습니다(다시 계산하지 않음). 지금 적용한 탐지 기준(기본값과 다른 항목 "

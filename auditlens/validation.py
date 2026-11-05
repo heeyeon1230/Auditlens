@@ -16,13 +16,14 @@ from datetime import date, datetime
 
 import pandas as pd
 
-from auditlens.schema import COLUMN_LABELS, REQUIRED_COLUMNS
+from auditlens.schema import COLUMN_LABELS, REQUIRED_COLUMNS, SINGLE_AMOUNT_LABELS
 
 ERROR = "오류"
 WARNING = "경고"
 INFO = "정보"
 
 MAX_EXAMPLES = 5  # 메시지에 보여 줄 예시 행 수
+DEBIT_SIDE, CREDIT_SIDE = "차변", "대변"  # 금액 한 열 형식에서 구분값을 연결할 쪽
 BALANCE_TOLERANCE = 1  # 전표별 차대 차이 허용액(원). 단수 차이 1원까지는 같은 것으로 봅니다.
 
 DATE_FORMATS = ["%Y-%m-%d", "%Y/%m/%d", "%Y.%m.%d", "%Y%m%d",
@@ -59,6 +60,11 @@ def file_row_number(index):
 
 def _label(col):
     return f"{COLUMN_LABELS[col]}({col})"
+
+
+def _name(col):
+    """표준 열 또는 금액 한 열 형식 항목의 한글 이름."""
+    return COLUMN_LABELS.get(col) or SINGLE_AMOUNT_LABELS[col]
 
 
 def _is_blank(value):
@@ -126,6 +132,23 @@ def _normalize_code(value):
     return str(value).strip()
 
 
+def dc_flag_key(value):
+    """차대 구분 값을 비교용 글자로 바꿉니다. 앞뒤 공백만 빼고, Excel이 1을 1.0으로 읽은 경우만 '1'로 맞춥니다.
+
+    대소문자나 표기는 바꾸지 않습니다(어떤 값이 차변인지는 사용자가 정합니다). 빈 값은 ''입니다.
+    """
+    return _normalize_code(value)
+
+
+def dc_flag_values(raw: pd.DataFrame, column):
+    """차대 구분 열에 실제로 있는 값과 행 수(많은 순). 빈 값은 넣지 않습니다. 반환값: [(값, 행 수), ...]"""
+    if column not in raw:
+        return []
+    keys = raw[column].map(dc_flag_key)
+    counts = keys[keys != ""].value_counts(sort=False).sort_values(ascending=False, kind="stable")
+    return [(k, int(n)) for k, n in counts.items()]
+
+
 def _examples(indices, values=None):
     shown = []
     for n, idx in enumerate(list(indices)[:MAX_EXAMPLES]):
@@ -145,27 +168,46 @@ def _add(result, level, code, item, problem, fix, rows=None, examples=""):
     })
 
 
-def validate_journal(raw: pd.DataFrame, mapping: dict) -> ValidationResult:
+def validate_journal(raw: pd.DataFrame, mapping: dict, single_amount: dict = None) -> ValidationResult:
     """업로드한 표와 열 연결 정보를 받아 검증하고, 분석용 표를 만듭니다.
 
     mapping: {표준 열 이름: 파일 열 이름 또는 None}
+    single_amount: 금액 한 열 형식일 때만 넣습니다. {"amount": 금액 열, "dc_flag": 차대 구분 열,
+                   "sides": {구분값: "차변" 또는 "대변"}}. 이때 mapping의 차변금액·대변금액 연결은 쓰지 않고,
+                   구분값이 가리키는 쪽에 금액을 그대로 옮겨 차변금액·대변금액 두 열을 만듭니다(부호는 바꾸지 않음).
+                   구분값이 비었거나 차변·대변으로 지정하지 않은 행은 경고(V12)와 함께 분석에서 제외합니다.
     """
     result = ValidationResult()
+    single = single_amount is not None
+    if single:
+        mapping = {k: (None if k in ("debit", "credit") else v) for k, v in mapping.items()}
+    # V4 등 금액 메시지에 쓸 이름. 금액 한 열 형식이면 사용자가 연결한 '금액' 열 기준으로 적습니다.
+    amount_names = ({"debit": "금액(차변으로 지정한 행)", "credit": "금액(대변으로 지정한 행)"} if single
+                    else {"debit": COLUMN_LABELS["debit"], "credit": COLUMN_LABELS["credit"]})
 
     # V1 필수 열 존재, 같은 파일 열을 두 번 연결했는지
-    missing = [c for c in REQUIRED_COLUMNS if not mapping.get(c)]
+    required = [c for c in REQUIRED_COLUMNS if not (single and c in ("debit", "credit"))]
+    missing = [c for c in required if not mapping.get(c)]
     for col in missing:
         _add(result, ERROR, "V1", _label(col),
              f"필수 열 '{COLUMN_LABELS[col]}'이(가) 연결되지 않았습니다.",
              f"파일에 '{COLUMN_LABELS[col]}' 열을 추가하거나, 열 연결 화면에서 어느 열이 "
              f"'{COLUMN_LABELS[col]}'인지 선택해 주세요.")
+    if single:
+        for key, label in SINGLE_AMOUNT_LABELS.items():
+            if not single_amount.get(key):
+                _add(result, ERROR, "V1", label,
+                     f"금액 한 열 형식의 필수 항목 '{label}'이(가) 연결되지 않았습니다.",
+                     f"열 연결 화면에서 어느 열이 '{label}'인지 선택해 주세요. 차변·대변이 두 열로 나뉜 파일이면 "
+                     "금액 형식을 '차변·대변 두 열'로 바꿔 주세요.")
     used = {}
-    for std_col, file_col in mapping.items():
+    linked = list(mapping.items()) + ([(k, single_amount.get(k)) for k in SINGLE_AMOUNT_LABELS] if single else [])
+    for std_col, file_col in linked:
         if file_col:
             used.setdefault(file_col, []).append(std_col)
     for file_col, std_cols in used.items():
         if len(std_cols) > 1:
-            names = ", ".join(f"'{COLUMN_LABELS[c]}'" for c in std_cols)
+            names = ", ".join(f"'{_name(c)}'" for c in std_cols)
             _add(result, ERROR, "V1", f"파일 열 '{file_col}'",
                  f"파일의 '{file_col}' 열 하나가 {names}에 동시에 연결되어 있습니다.",
                  "열 연결 화면에서 각 항목에 서로 다른 파일 열을 선택해 주세요.")
@@ -174,6 +216,16 @@ def validate_journal(raw: pd.DataFrame, mapping: dict) -> ValidationResult:
         _add(result, ERROR, "V1", f"파일 열 '{file_col}'",
              f"연결한 열 '{file_col}'이(가) 파일에 없습니다.",
              "파일을 다시 올리거나 열 연결을 다시 선택해 주세요.")
+
+    # V12 차대 구분 값 연결 (금액 한 열 형식). 어느 값이 차변이고 어느 값이 대변인지는 사용자가 정합니다.
+    sides = {}
+    if single and single_amount.get("dc_flag"):
+        sides = {str(k): v for k, v in (single_amount.get("sides") or {}).items() if v in (DEBIT_SIDE, CREDIT_SIDE)}
+        for side in (DEBIT_SIDE, CREDIT_SIDE):
+            if side not in sides.values():
+                _add(result, ERROR, "V12", "차대 구분 값",
+                     f"'{side}'으로 지정한 차대 구분 값이 없습니다.",
+                     f"열 연결 화면의 '차대 구분 값 연결'에서 파일의 값 중 어느 것이 '{side}'인지 골라 주세요.")
 
     # V2 빈 파일
     if len(raw) == 0:
@@ -195,6 +247,33 @@ def validate_journal(raw: pd.DataFrame, mapping: dict) -> ValidationResult:
         excluded.update(indices)
         for i, text in zip(indices, texts):
             reasons.setdefault(i, []).append(text)
+
+    # 금액 한 열 형식: 구분값이 가리키는 쪽에 금액(파일 값 그대로)을 옮겨 차변금액·대변금액 두 열을 만듭니다.
+    # 금액을 숫자로 읽는 일과 그 뒤의 검사(V4~V8)는 두 열 형식과 똑같이 진행합니다.
+    if single:
+        keys = raw[single_amount["dc_flag"]].map(dc_flag_key)
+        side = keys.map(sides)
+        amounts = raw[single_amount["amount"]]
+        work["debit"] = [a if s == DEBIT_SIDE else "" for a, s in zip(amounts, side)]
+        work["credit"] = [a if s == CREDIT_SIDE else "" for a, s in zip(amounts, side)]
+        work = work[[c for c in COLUMN_LABELS if c in work]].copy()  # 열 순서를 두 열 형식과 같게(표준 열 순서)
+        blank_idx = [i for i, k in keys.items() if k == ""]
+        if blank_idx:
+            exclude(blank_idx, ["차대 구분 없음"] * len(blank_idx))
+            _add(result, WARNING, "V12", f"차대 구분({single_amount['dc_flag']})",
+                 f"차대 구분 값이 비어 있는 행이 {len(blank_idx)}개 있습니다.",
+                 "해당 행에 차변·대변 구분을 채워 주세요. 이 행들은 차변인지 대변인지 알 수 없어 분석에서 제외됩니다.",
+                 blank_idx, _examples(blank_idx))
+        unknown_idx = [i for i, k in keys.items() if k != "" and pd.isna(side[i])]
+        if unknown_idx:
+            values = [keys[i] for i in unknown_idx]
+            exclude(unknown_idx, [f"차대 구분 값 '{v}'을(를) 차변·대변으로 지정하지 않음" for v in values])
+            kinds = ", ".join(f"'{v}'({n}행)" for v, n in pd.Series(values).value_counts(sort=False).items())
+            _add(result, WARNING, "V12", f"차대 구분({single_amount['dc_flag']})",
+                 f"차변·대변으로 지정하지 않은 구분 값이 있는 행이 {len(unknown_idx)}개 있습니다: {kinds}",
+                 "열 연결 화면의 '차대 구분 값 연결'에서 이 값을 차변 또는 대변으로 지정하거나, 파일의 값을 고쳐 "
+                 "주세요. 지정하지 않은 값의 행은 분석에서 제외됩니다.",
+                 unknown_idx, _examples(unknown_idx, values))
 
     # V5 필수 값 결측 (전표번호, 회계처리일, 계정코드는 없으면 분석에서 제외)
     for col in ["je_id", "posting_date", "account_code"]:
@@ -264,9 +343,11 @@ def validate_journal(raw: pd.DataFrame, mapping: dict) -> ValidationResult:
                 bad_vals.append(str(exc))
                 values[i] = 0.0
         if bad_idx:
-            exclude(bad_idx, [f"{COLUMN_LABELS[col]} 형식 오류('{v}')" for v in bad_vals])
-            _add(result, WARNING, "V4", _label(col),
-                 f"숫자로 읽을 수 없는 {COLUMN_LABELS[col]}이 {len(bad_idx)}개 행에 있습니다.",
+            exclude(bad_idx, [f"{amount_names[col]} 형식 오류('{v}')" for v in bad_vals])
+            item = (f"금액({single_amount['amount']}) · {'차변' if col == 'debit' else '대변'}으로 지정한 행" if single
+                    else _label(col))
+            _add(result, WARNING, "V4", item,
+                 f"숫자로 읽을 수 없는 {amount_names[col]}이 {len(bad_idx)}개 행에 있습니다.",
                  "숫자만 입력해 주세요(예: 1500000 또는 1,500,000). 이 행들은 분석에서 제외됩니다.",
                  bad_idx, _examples(bad_idx, bad_vals))
         work[col] = pd.Series(values, dtype=float)
@@ -285,7 +366,12 @@ def validate_journal(raw: pd.DataFrame, mapping: dict) -> ValidationResult:
              f"한 행에 차변과 대변이 모두 적힌 행이 {len(both)}개 있습니다.",
              "한 행에는 차변 또는 대변 중 하나만 적고, 다른 쪽은 0 또는 빈칸으로 두세요.",
              both, _examples(both))
-    if neither:
+    if neither and single:
+        _add(result, WARNING, "V6", "금액",
+             f"금액이 0이거나 빈칸인 행이 {len(neither)}개 있습니다.",
+             "금액이 빠졌는지 확인해 주세요. 금액이 없는 행이라면 삭제해도 됩니다.",
+             neither, _examples(neither))
+    elif neither:
         _add(result, WARNING, "V6", "차변·대변",
              f"차변과 대변이 모두 0이거나 빈칸인 행이 {len(neither)}개 있습니다.",
              "금액이 빠졌는지 확인해 주세요. 금액이 없는 행이라면 삭제해도 됩니다.",
@@ -293,7 +379,13 @@ def validate_journal(raw: pd.DataFrame, mapping: dict) -> ValidationResult:
 
     # V7 음수 금액
     negative = [i for i in work.index if work.at[i, "debit"] < 0 or work.at[i, "credit"] < 0]
-    if negative:
+    if negative and single:
+        _add(result, WARNING, "V7", "금액",
+             f"음수 금액이 있는 행이 {len(negative)}개 있습니다.",
+             "역분개를 음수로 표시하는 회사도 있으니 의도한 것인지 확인해 주세요. 프로그램은 부호를 바꾸지 않고, 차대 "
+             "구분이 가리키는 쪽에 음수 그대로 둡니다(예: 구분 '차변', 금액 -1,000 → 차변 -1,000).",
+             negative, _examples(negative))
+    elif negative:
         _add(result, WARNING, "V7", "차변·대변",
              f"음수 금액이 있는 행이 {len(negative)}개 있습니다.",
              "역분개를 음수로 표시하는 회사도 있으니 의도한 것인지 확인해 주세요. "
